@@ -71,4 +71,14 @@ async def list_collections(db_path: str | None = None) -> list[str]:
         List of collection/table names.
     """
     db = await get_async_db(db_path)
-    return await db.table_names()
+    # Async LanceDB: list_tables() (table_names() is deprecated) returns a
+    # paginated ListTablesResponse — walk page_token to collect every name.
+    names: list[str] = []
+    page_token = None
+    while True:
+        resp = await db.list_tables(page_token=page_token)
+        names.extend(resp.tables)
+        page_token = resp.page_token
+        if not page_token:
+            break
+    return names
