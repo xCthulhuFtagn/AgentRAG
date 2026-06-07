@@ -87,7 +87,8 @@ def index():
                     .classes("w-full")
                 )
                 if frozen:
-                    btn.props("disable")
+                    # Still openable so you can watch the frozen chat; just
+                    # visually marked. Sending is blocked inside the chat.
                     btn.classes("frozen")
                     ui.label("Reindexing…").classes("text-xs text-blue-600")
 
@@ -219,9 +220,8 @@ def index():
         files_panel.refresh()
 
     def open_in_chat(pid):
-        if runtime.is_frozen(pid):
-            ui.notify("Project is reindexing — chat is frozen", color="warning")
-            return
+        # Openable even while reindexing — the chat shows frozen (input disabled),
+        # so you can switch away and back and still see the freeze.
         if ctx["chat_pid"] != pid:
             ctx["chat_pid"] = pid
             ctx["messages"] = []
@@ -428,6 +428,24 @@ def index():
             files_panel()
         with ui.column().classes("w-2/3 h-full p-3"):
             chat_panel()
+
+    # Keep freeze visuals in sync with background reindexing, regardless of
+    # navigation. Refresh only when the relevant projects' frozen state changes
+    # (so it never interferes with live chat streaming).
+    ctx["_frozen_snap"] = None
+
+    def _sync_freeze():
+        snap = (
+            runtime.is_frozen(ctx["chat_pid"]) if ctx["chat_pid"] else False,
+            runtime.is_frozen(ctx["open_pid"]) if ctx["open_pid"] else False,
+        )
+        if snap != ctx["_frozen_snap"]:
+            ctx["_frozen_snap"] = snap
+            projects_list.refresh()
+            files_panel.refresh()
+            chat_panel.refresh()
+
+    ui.timer(0.4, _sync_freeze)
 
 
 def main():

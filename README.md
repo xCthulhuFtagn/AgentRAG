@@ -80,7 +80,7 @@ A Python-only UI: **projects on the left, chat on the right**.
 
 - Create / rename / delete / open projects (green theme).
 - Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & reindex** applies everything at once (one reindex); **Cancel** discards.
-- That single reindex **freezes** the chat (turns blue, trembles, snows ❄) until it finishes. "Open in chat" is disabled for a reindexing project.
+- That single reindex **freezes** the chat (turns blue, trembles, snows ❄) until it finishes — sending is blocked, but you can still open/return to the frozen chat to watch it. The freeze tracks the project's reindex status live, so switching chats and back keeps it correct.
 - Chat streams the **live agent trace** (orchestrator → planner → search → sufficient) then the final answer.
 - Projects are **isolated** — each has its own LanceDB, so search never leaks across projects.
 
