@@ -1,15 +1,19 @@
 /* Agentic RAG web UI — green theme + frozen-chat animation */
 
 /* Whole app is green-toned so the blue freeze stands out strongly. */
-body {
-  background: #ecfdf5;             /* emerald-50 — overall green wash */
+body,
+.nicegui-content,
+.q-page,
+.q-page-container,
+.q-layout {
+  background: #ecfdf5 !important;   /* emerald-50 — kill white wrappers */
 }
 .app-sidebar {
   background: #d1fae5;             /* emerald-100 — projects/files column */
 }
 .chat-panel {
-  background: #f0fdf4;             /* green-50 card */
-  border-color: #6ee7b7;          /* emerald-300 */
+  background: #d7f5e3;             /* clearly green (not white) idle chat */
+  border-color: #34d399;          /* emerald-400 */
 }
 .project-card {
   background: #ffffff;            /* white card pops on the green sidebar */
@@ -22,8 +26,8 @@ body {
   box-shadow: 0 2px 8px rgba(22, 163, 74, 0.18);
 }
 .project-card.active {
-  border-color: #16a34a;
-  background: #dcfce7;           /* green-100 */
+  border-color: #15803d;         /* green-700 */
+  background: #6ee7b7;           /* emerald-300 — clearly darker when selected */
 }
 
 /* Frozen state: chat panel and the "Open in chat" button turn blue and tremble */

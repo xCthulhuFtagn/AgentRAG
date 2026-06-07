@@ -44,6 +44,10 @@ def index():
     """Root page — runs per client connection (per-client state via closures)."""
     ui.colors(primary="#16a34a")
     ui.add_css(CSS)
+    # Drop NiceGUI's default content padding/gap so the h-screen layout fills the
+    # viewport exactly (otherwise the page overflows and the chat input scrolls
+    # off the bottom).
+    ui.query(".nicegui-content").classes("p-0 gap-0")
 
     # Per-client UI state.
     # ctx["edit"]: None, or {"pid": str, "files": [staged-entry, ...]} while editing files.
@@ -168,7 +172,10 @@ def index():
     def chat_panel():
         pid = ctx["chat_pid"]
         frozen = bool(pid) and runtime.is_frozen(pid)
-        base = "chat-panel w-full h-full flex flex-col gap-2 p-3 rounded-lg border"
+        base = (
+            "chat-panel w-full max-w-xl h-full flex flex-col gap-2 "
+            "p-3 rounded-lg border"
+        )
         with ui.column().classes(base + (" frozen" if frozen else "")):
             if frozen:
                 ui.html(_snowflakes_html()).classes("snowflakes")
@@ -435,7 +442,7 @@ def index():
             projects_list()
             ui.separator()
             files_panel()
-        with ui.column().classes("w-2/3 h-full p-3"):
+        with ui.column().classes("w-2/3 h-full p-3 items-center"):
             chat_panel()
 
     # Keep freeze visuals in sync with background reindexing, regardless of
