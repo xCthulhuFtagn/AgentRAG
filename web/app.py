@@ -254,6 +254,7 @@ def index():
         if ctx["chat_pid"] != pid:
             ctx["chat_pid"] = pid
             ctx["messages"] = []
+        open_project(pid)  # also select the project (highlight card, show its files)
         chat_panel.refresh()
 
     async def new_project():
