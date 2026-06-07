@@ -1,6 +1,6 @@
 """Tests for the Agentic RAG LangGraph pipeline."""
 
-import asyncio
+import os
 from pathlib import Path
 import sys
 
@@ -17,6 +17,12 @@ from src.state import (
     SufficientContextResult,
 )
 from src.graph import build_graph
+
+# The live smoke test needs a real DeepSeek key (it calls the API).
+requires_api_key = pytest.mark.skipif(
+    not os.getenv("DEEPSEEK_API_KEY"),
+    reason="DEEPSEEK_API_KEY not set — skipping live graph smoke test",
+)
 
 
 def test_graph_compiles():
@@ -100,26 +106,26 @@ def test_sufficient_context_result():
     assert len(result.missing_parts) == 1
 
 
+@requires_api_key
 @pytest.mark.asyncio
-async def test_graph_async_stream():
-    """Verify graph can be invoked asynchronously (without indexed docs)."""
-    graph = build_graph()
-    state = make_initial_state(query="What is 2+2?")
+async def test_graph_async_stream(tmp_path):
+    """Live smoke test: the graph streams without error on an empty corpus.
 
-    # This should run without error — graph handles empty collections gracefully
-    try:
-        event_count = 0
-        async for event in graph.astream(
-            state,
-            config={"configurable": {"thread_id": "test-session"}},
-            stream_mode="updates",
-        ):
-            assert isinstance(event, dict)
-            event_count += 1
-        print(f"Graph stream produced {event_count} events")
-    except Exception as e:
-        # If no documents are indexed, we expect graceful handling
-        print(f"Graph stream complete (note: {type(e).__name__}: {e})")
+    Scoped to a throwaway db_path (tmp_path) so it never writes under the real
+    data/ dir, and skipped when no DEEPSEEK_API_KEY is set (it calls the API).
+    """
+    graph = build_graph()
+    state = make_initial_state(query="What is 2+2?", db_path=str(tmp_path / "lancedb"))
+
+    event_count = 0
+    async for event in graph.astream(
+        state,
+        config={"configurable": {"thread_id": "test-session"}},
+        stream_mode="updates",
+    ):
+        assert isinstance(event, dict)
+        event_count += 1
+    assert event_count > 0
 
 
 if __name__ == "__main__":
