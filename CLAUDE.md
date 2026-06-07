@@ -44,22 +44,38 @@ orchestrator ──simple──► synthesis ──► END
 - **All async** — nodes are `async def`, tools are `async def`, streaming via `graph.astream()`
 - **Only vector search tools** — `vector_search` and `list_collections` via LanceDB; no web/Wikipedia APIs
 - **Honest refusal** — Give Up node builds a system-generated message (no LLM) listing what was found, what's missing, and why
+- **Structured output via function calling** — `get_structured_llm()` in `common.py` uses `with_structured_output(schema, method="function_calling")`. DeepSeek's API rejects the default json_schema `response_format` ("This response_format type is unavailable now").
 
-## State accumulation
+## State accumulation & DB scope
 
-`search_results`, `rewritten_queries`, `trace` use `operator.add` reducer — each Command.update appends, not overwrites. Critical for the iteration loop: each pass adds to previous results.
+- `search_results`, `rewritten_queries`, `trace` use `operator.add` reducer — each Command.update appends. Critical for the iteration loop.
+- `search_tasks` (no reducer, overwrite) carries `[{collection, query}]` for the current turn. `collection=None` → search ALL collections (used on iteration, when the missing piece's file is unknown).
+- `db_path` (set by `make_initial_state(db_path=...)`, default None=global `LANCE_DB_PATH`) scopes every search to one LanceDB → per-project isolation. Threaded into `vector_search`/`list_collections`.
+
+## Multi-file search
+
+`planner` builds one route per relevant collection; `query_rewriter` emits one `search_task` per route; `search_fanout` searches every `(collection, query)` pair in parallel (`asyncio.gather`). This is what makes cross-file multi-hop work.
 
 ## vectordb module
 
 Self-contained at `src/vectordb/`:
 - `embeddings.py` — FastEmbed (ONNX, BAAI/bge-small-en-v1.5, 384d)
-- `client.py` — LanceDB async/sync connections
-- `tools.py` — `@tool` wrappers for LangChain bind_tools
-- `indexer.py` — CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`
+- `client.py` — LanceDB async/sync connections (`get_async_db(db_path)`)
+- `tools.py` — `@tool` wrappers; **async LanceDB**: `await table.search(vec)` then `.limit().to_list()`
+- `indexer.py` — hybrid text extraction: LiteParse for PDF/DOCX/PPTX, `read_text()` for TXT/MD. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`
+
+## web module (NiceGUI)
+
+`web/` is a sibling top-level package — absolute imports `from src... import ...`, one-directional (`web → src`). Run: `python -m web.app`.
+- `app.py` — NiceGUI UI passed as `ui.run(root=index)` (script mode needs a root function, not `@ui.page`). Green theme; chat freezes (blue + tremble via inlined `static/style.css`) while a project reindexes.
+- `projects.py` — `ProjectStore`: filesystem CRUD. `data/projects/{id}/{meta.json,files/}` + `data/lancedb/{id}/`. File list read from disk (no drift).
+- `runtime.py` — `GRAPH` (built once), `STORE`, per-project status + `asyncio.Lock`.
+- `indexing.py` — `reindex_project(id)`: wipe `data/lancedb/{id}`, re-run `index_documents`; status `reindexing`→`idle`.
+- `chat.py` — `run_chat(project_id, query)`: fresh `thread_id` per message (no state bleed), streams `(trace|answer)` from `graph.astream`.
 
 ## DeepSeek API
 
-OpenAI-compatible endpoint at `https://api.deepseek.com/v1`. Model: `deepseek-chat`. Key from VSCode settings → `.env` file. LLM factory cached via `@lru_cache` in `src/agents/common.py`.
+OpenAI-compatible endpoint at `https://api.deepseek.com/v1`. Model: `deepseek-chat`. Key from VSCode settings → `.env`. LLM factory cached via `@lru_cache` in `src/agents/common.py`.
 
 ## Iteration loop
 
@@ -74,6 +90,7 @@ Query Rewriter checks `state["feedback"]` — if set, generates targeted query f
 
 ```bash
 pip install -r requirements.txt
-python -m src.vectordb.indexer --dir docs/sample_docs
+python -m src.vectordb.indexer --dir docs/sample_docs            # CLI corpus
 python -m src.main --query "What CPU does the Project Alpha server have?"
+python -m web.app                                                # web UI → http://localhost:8080
 ```

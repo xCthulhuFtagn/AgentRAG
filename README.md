@@ -52,10 +52,12 @@ orchestrator ◀── entry_point
 
 | Component | Choice | Why |
 |-----------|--------|-----|
-| LLM | DeepSeek (`deepseek-chat`) | OpenAI-compatible API |
+| LLM | DeepSeek (`deepseek-chat`) | OpenAI-compatible API; structured output via function calling |
 | Orchestration | LangGraph | Command-driven edgeless graph |
-| Vector DB | LanceDB | Serverless, async, columnar files |
+| Vector DB | LanceDB | Serverless, async, columnar files; per-project isolation |
 | Embeddings | FastEmbed (`BAAI/bge-small-en-v1.5`) | ONNX, no PyTorch, air-gapped friendly |
+| Parsing | LiteParse + read_text | PDF/DOCX/PPTX via LiteParse (Rust), TXT/MD direct |
+| Web UI | NiceGUI | Python-only, WebSocket live trace, no JS toolchain |
 | Runtime | Full async | `ainvoke`, `astream`, `asyncio.gather` |
 
 ## Quick start
@@ -64,37 +66,46 @@ orchestrator ◀── entry_point
 # Install
 pip install -r requirements.txt
 
-# Index sample documents
+# ── Web UI (projects + chat) ──
+python -m web.app                       # → http://localhost:8080
+
+# ── Or the CLI ──
 python -m src.vectordb.indexer --dir docs/sample_docs
-
-# Run a query
 python -m src.main --query "What CPU and RAM does the server for Project Alpha have?"
-
-# Simple query (no multi-step needed)
-python -m src.main --query "What is the capital of France?"
 ```
+
+## Web interface (NiceGUI)
+
+A Python-only UI: **projects on the left, chat on the right**.
+
+- Create / rename / delete / open projects (green theme).
+- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`) — add / rename / delete.
+- Any file change **reindexes** the project's vector DB; the chat **freezes** (turns blue and trembles) until reindexing finishes. "Open in chat" is disabled for a reindexing project.
+- Chat streams the **live agent trace** (orchestrator → planner → search → sufficient) then the final answer.
+- Projects are **isolated** — each has its own LanceDB, so search never leaks across projects.
 
 ## Project structure
 
 ```
-src/
-├── agents/               # 7 agents + common LLM factory
+src/                      # RAG engine (graph + vectordb), unchanged by the UI
+├── agents/               # 7 agents + common LLM factory (get_structured_llm)
 │   ├── orchestrator.py   #   Command(goto="synthesis" | "planner")
 │   ├── planner.py        #   Command(goto="query_rewriter")
-│   ├── query_rewriter.py #   Command(goto="search_fanout")
-│   ├── search_fanout.py  #   Command(goto="sufficient_context")
+│   ├── query_rewriter.py #   Command(goto="search_fanout") — one search_task per route
+│   ├── search_fanout.py  #   Command(goto="sufficient_context") — all (collection,query) pairs
 │   ├── sufficient_context.py  # Command(goto="synthesis" | "query_rewriter" | "give_up")
 │   ├── synthesis.py      #   Command(goto=END)
 │   └── give_up.py        #   Command(goto=END) — system refusal, no LLM
-├── vectordb/             # Vector DB module
-│   ├── embeddings.py     #   FastEmbed wrapper
-│   ├── client.py         #   LanceDB connection
-│   ├── tools.py          #   vector_search, list_collections (@tool)
-│   └── indexer.py        #   Document indexing CLI
-├── config.py             # DeepSeek + LanceDB + embedding settings
-├── state.py              # AgentRAGState TypedDict
-├── graph.py              # Edgeless StateGraph (set_entry_point only)
-└── main.py               # CLI: python -m src.main --query "..."
+├── vectordb/             # embeddings, LanceDB client, @tools, hybrid indexer
+├── config.py · state.py · graph.py · main.py
+
+web/                      # NiceGUI UI — imports from src/ (web → src, one-directional)
+├── app.py                #   ui.run(root=index): projects + chat, green theme, frozen-chat CSS
+├── projects.py           #   ProjectStore — filesystem CRUD (data/projects, data/lancedb)
+├── runtime.py            #   GRAPH (built once), STORE, per-project status + locks
+├── indexing.py           #   reindex_project() — wipe + rebuild project DB
+├── chat.py               #   run_chat() — streams astream events, fresh thread per message
+└── static/style.css      #   green theme + .frozen (blue + tremble)
 ```
 
 ## How the iteration loop works

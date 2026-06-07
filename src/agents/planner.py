@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, PlanResult, make_trace_entry
-from src.agents.common import get_llm
+from src.agents.common import get_structured_llm
 from src.vectordb.tools import list_collections
 
 PLANNER_PROMPT = """You are the Planner Agent of an Agentic RAG system.
@@ -36,9 +36,7 @@ async def planner_node(
     state: AgentRAGState, *, config: RunnableConfig
 ) -> Command:
     """Planner: create search routes, then command query_rewriter."""
-    llm = get_llm()
-
-    collections = await list_collections.ainvoke({})
+    collections = await list_collections.ainvoke({"db_path": state.get("db_path")})
     collections_str = (
         ", ".join(collections)
         if collections
@@ -49,7 +47,7 @@ async def planner_node(
         query=state["query"],
         collections=collections_str,
     )
-    plan: PlanResult = await llm.with_structured_output(PlanResult).ainvoke(prompt)
+    plan: PlanResult = await get_structured_llm(PlanResult).ainvoke(prompt)
 
     steps_dicts = [s.model_dump() for s in plan.steps]
 

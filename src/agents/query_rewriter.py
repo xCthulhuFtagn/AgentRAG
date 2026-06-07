@@ -50,9 +50,13 @@ async def query_rewriter_node(
 
     feedback = state.get("feedback", "")
     rewritten: list[str] = []
+    # search_tasks pairs each query with its target collection.
+    # collection=None means "search across all collections".
+    search_tasks: list[dict] = []
 
     if feedback and state.get("iteration_count", 0) > 0:
         # ── Iteration mode: single targeted rewrite ──
+        # We don't know which file holds the missing piece → search all (None).
         prompt = REWRITER_ITERATION_PROMPT.format(
             original_query=state["query"],
             missing_parts=", ".join(state.get("missing_parts", [])),
@@ -61,39 +65,44 @@ async def query_rewriter_node(
         )
         result: str = (await llm.ainvoke(prompt)).content.strip().strip('"')
         rewritten = [result]
+        search_tasks = [{"collection": None, "query": result}]
         mode = "iteration"
 
         trace_entry = make_trace_entry(
             agent="query_rewriter",
             decision=mode,
-            detail=f"query='{result}'",
+            detail=f"query='{result}' (all collections)",
         )
     else:
-        # ── Initial mode: rewrite ALL plan routes ──
+        # ── Initial mode: rewrite ALL plan routes, one task per route ──
         plan_steps = state.get("plan_steps", [])
         if not plan_steps:
             rewritten = [state["query"]]  # fallback: use original query
+            search_tasks = [{"collection": None, "query": state["query"]}]
         else:
             for step in plan_steps:
+                collection = step.get("collection", "unknown")
                 prompt = REWRITER_PROMPT.format(
                     original_query=state["query"],
-                    collection=step.get("collection", "unknown"),
+                    collection=collection,
                     subquery=step.get("subquery", state["query"]),
                 )
                 result: str = (await llm.ainvoke(prompt)).content.strip().strip('"')
                 rewritten.append(result)
+                search_tasks.append({"collection": collection, "query": result})
         mode = "initial"
 
         trace_entry = make_trace_entry(
             agent="query_rewriter",
             decision=f"{mode} ({len(rewritten)} queries)",
-            detail=str(rewritten),
+            detail=str(search_tasks),
         )
 
     return Command(
         goto="search_fanout",
         update={
             "rewritten_queries": rewritten,
+            "search_tasks": search_tasks,
             "trace": [trace_entry],
         },
     )

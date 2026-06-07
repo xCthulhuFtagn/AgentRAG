@@ -38,6 +38,15 @@ def test_state_defaults():
     assert state["trace"] == []
     assert state["is_complex"] is None
     assert state["rewritten_queries"] == []
+    # db_path defaults to None (global LANCE_DB_PATH); search_tasks empty
+    assert state["db_path"] is None
+    assert state["search_tasks"] == []
+
+
+def test_state_db_path_threading():
+    """db_path is carried through state for per-project DB isolation."""
+    state = make_initial_state(query="q", db_path="data/lancedb/proj123")
+    assert state["db_path"] == "data/lancedb/proj123"
 
 
 def test_state_annotated_reducers():

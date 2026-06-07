@@ -1,5 +1,9 @@
 """Document indexing — loads documents into LanceDB with FastEmbed embeddings.
 
+Text extraction is hybrid:
+- Rich documents (PDF/DOCX/PPTX) → LiteParse (Rust, in-process, OCR-capable).
+- Plain text (TXT/MD) → direct read (no parser needed).
+
 Usage:
     python -m src.vectordb.indexer --dir docs/sample_docs
     python -m src.vectordb.indexer --dir docs/sample_docs --db ./lancedb_data
@@ -8,35 +12,39 @@ Usage:
 import argparse
 import asyncio
 import sys
+from functools import lru_cache
 from pathlib import Path
 
-from pypdf import PdfReader
+from liteparse import LiteParse
 
 from src.config import LANCE_DB_PATH
 from src.vectordb.embeddings import embed_batch
 from src.vectordb.client import get_sync_db
 
+# Rich document formats parsed by LiteParse.
+DOC_SUFFIXES = {".pdf", ".docx", ".pptx"}
+# Plain-text formats read directly.
+TEXT_SUFFIXES = {".txt", ".md"}
+SUPPORTED_SUFFIXES = DOC_SUFFIXES | TEXT_SUFFIXES
 
-def extract_text_from_pdf(file_path: Path) -> str:
-    """Extract text from a PDF file."""
-    reader = PdfReader(str(file_path))
-    texts = []
-    for page in reader.pages:
-        text = page.extract_text()
-        if text:
-            texts.append(text)
-    return "\n\n".join(texts)
+
+@lru_cache(maxsize=1)
+def _get_parser() -> LiteParse:
+    """Cached LiteParse instance (spawns OCR workers lazily)."""
+    return LiteParse(quiet=True)
 
 
 def extract_text(file_path: Path) -> str:
-    """Extract text from various file formats."""
+    """Extract text from a supported file.
+
+    PDF/DOCX/PPTX via LiteParse; TXT/MD read directly.
+    """
     ext = file_path.suffix.lower()
-    if ext == ".pdf":
-        return extract_text_from_pdf(file_path)
-    elif ext in (".txt", ".md", ".py", ".json", ".yaml", ".yml", ".csv"):
+    if ext in TEXT_SUFFIXES:
         return file_path.read_text(encoding="utf-8")
-    else:
-        raise ValueError(f"Unsupported file type: {ext}")
+    if ext in DOC_SUFFIXES:
+        return _get_parser().parse(str(file_path)).text
+    raise ValueError(f"Unsupported file type: {ext}")
 
 
 def split_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
@@ -67,21 +75,17 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
         print(f"Error: directory '{docs_dir}' does not exist")
         sys.exit(1)
 
-    # Use sync DB for indexing (simpler for bulk operations)
     db = get_sync_db(db_path)
-    files = list(docs_path.glob("*.*"))
+    files = [f for f in docs_path.glob("*.*") if f.suffix.lower() in SUPPORTED_SUFFIXES]
 
     if not files:
-        print(f"No files found in {docs_dir}")
+        print(f"No supported files found in {docs_dir}")
+        print(f"Supported formats: {', '.join(sorted(SUPPORTED_SUFFIXES))}")
         return
 
     print(f"Found {len(files)} file(s) to index\n")
 
     for file_path in files:
-        if file_path.suffix.lower() not in (".pdf", ".txt", ".md"):
-            print(f"  Skipping unsupported: {file_path.name}")
-            continue
-
         table_name = file_path.stem.replace(" ", "_").replace("-", "_").replace(".", "_")
         print(f"  Indexing: {file_path.name} → table '{table_name}'")
 
@@ -98,10 +102,8 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
         chunks = split_text(text, chunk_size=500, overlap=50)
         print(f"    {len(chunks)} chunks, embedding...")
 
-        # Embed all chunks in batches
         embeddings = await embed_batch(chunks)
 
-        # Create or replace table
         records = [
             {"text": chunk, "vector": emb}
             for chunk, emb in zip(chunks, embeddings)

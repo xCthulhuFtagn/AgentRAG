@@ -64,6 +64,10 @@ class AgentRAGState(TypedDict):
     is_complex: Optional[bool]
     orchestrator_reasoning: str
 
+    # Vector DB scope — which LanceDB to search (per-project isolation).
+    # None → global LANCE_DB_PATH (CLI default).
+    db_path: Optional[str]
+
     # Planner
     plan_steps: list[dict]
     # Current route being processed (set by Planner)
@@ -71,6 +75,9 @@ class AgentRAGState(TypedDict):
 
     # Query Rewriter
     rewritten_queries: Annotated[list[str], operator.add]
+    # Current-turn search tasks: [{"collection": str|None, "query": str}].
+    # Overwritten each turn (no reducer) — collection=None means "search all".
+    search_tasks: list[dict]
 
     # Search Fanout
     search_results: Annotated[list[dict], operator.add]
@@ -96,15 +103,22 @@ class AgentRAGState(TypedDict):
 def make_initial_state(
     query: str,
     max_iterations: int = 3,
+    db_path: Optional[str] = None,
 ) -> AgentRAGState:
-    """Create a clean initial state for the graph."""
+    """Create a clean initial state for the graph.
+
+    db_path scopes vector search to one LanceDB (per-project isolation).
+    None → global LANCE_DB_PATH (CLI default, backward-compatible).
+    """
     return AgentRAGState(
         query=query,
+        db_path=db_path,
         is_complex=None,
         orchestrator_reasoning="",
         plan_steps=[],
         current_route=None,
         rewritten_queries=[],
+        search_tasks=[],
         search_results=[],
         sufficient=None,
         sufficient_reason="",

@@ -16,7 +16,7 @@ from langgraph.types import Command
 
 from src.config import MAX_ITERATIONS
 from src.state import AgentRAGState, SufficientContextResult, make_trace_entry
-from src.agents.common import get_llm
+from src.agents.common import get_structured_llm
 
 SUFFICIENT_CONTEXT_PROMPT = """You are the Sufficient Context Agent — the quality-control inspector of an Agentic RAG system.
 
@@ -58,8 +58,6 @@ async def sufficient_context_node(
     2. insufficient + iterations left → Command(goto="query_rewriter") — search more
     3. insufficient + max iterations  → Command(goto="give_up") — system refusal
     """
-    llm = get_llm()
-
     max_iter = state.get("max_iterations", MAX_ITERATIONS)
     iteration = state.get("iteration_count", 0)
 
@@ -84,7 +82,7 @@ async def sufficient_context_node(
         previous_gaps=", ".join(state.get("missing_parts", [])) or "(none)",
     )
 
-    result: SufficientContextResult = await llm.with_structured_output(
+    result: SufficientContextResult = await get_structured_llm(
         SufficientContextResult
     ).ainvoke(prompt)
 

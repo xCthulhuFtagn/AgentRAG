@@ -1,0 +1,57 @@
+/* Agentic RAG web UI — green theme + frozen-chat animation */
+
+.project-card {
+  background: #f0fdf4;            /* green-50 */
+  border: 1px solid #bbf7d0;     /* green-200 */
+  border-radius: 10px;
+  transition: box-shadow 0.15s, border-color 0.15s;
+}
+.project-card:hover {
+  border-color: #16a34a;         /* green-600 */
+  box-shadow: 0 2px 8px rgba(22, 163, 74, 0.18);
+}
+.project-card.active {
+  border-color: #16a34a;
+  background: #dcfce7;           /* green-100 */
+}
+
+/* Frozen state: chat panel and the "Open in chat" button turn blue and tremble */
+.frozen {
+  background: #dbeafe !important;            /* blue-100 */
+  border: 2px solid #3b82f6 !important;      /* blue-500 */
+  animation: tremble 0.25s infinite;
+}
+@keyframes tremble {
+  0%, 100% { transform: translateX(0); }
+  25%      { transform: translateX(-1.5px); }
+  75%      { transform: translateX(1.5px); }
+}
+
+/* Agent trace step chips */
+.trace-step {
+  font-family: ui-monospace, monospace;
+  font-size: 0.8rem;
+  color: #1e3a8a;                /* blue-900 */
+  background: #eff6ff;           /* blue-50 */
+  border-left: 3px solid #3b82f6;
+  padding: 2px 8px;
+  margin: 2px 0;
+  border-radius: 4px;
+}
+
+.chat-bubble-user {
+  background: #16a34a;           /* green-600 */
+  color: white;
+  border-radius: 12px 12px 2px 12px;
+  padding: 8px 12px;
+  align-self: flex-end;
+  max-width: 80%;
+}
+.chat-bubble-assistant {
+  background: #f1f5f9;           /* slate-100 */
+  color: #0f172a;
+  border-radius: 12px 12px 12px 2px;
+  padding: 8px 12px;
+  align-self: flex-start;
+  max-width: 90%;
+}

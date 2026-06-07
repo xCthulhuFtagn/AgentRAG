@@ -8,23 +8,27 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, OrchestratorResult, make_trace_entry
-from src.agents.common import get_llm
+from src.agents.common import get_structured_llm
 
 ORCHESTRATOR_PROMPT = """You are the Orchestrator (Root Agent) of an Agentic RAG system.
 
-Your job: assess whether a user query can be answered directly or requires multi-step retrieval.
+Your job: decide whether a query needs to RETRIEVE from the indexed documents
+(complex → full retrieval pipeline) or can be answered with NO document lookup
+at all (simple → answer directly).
 
-A query is COMPLEX (is_complex=True) if:
-- It requires information from multiple different sources/databases
-- It requires multiple hops: find something, then use that to find something else
-- It asks about multiple distinct entities or topics that need separate searches
-- It has sub-questions that need to be answered independently
-- The answer likely cannot be found in a single document
+This is a RAG system over the user's private documents. Almost every real
+question is about facts that live in those documents, so default to COMPLEX.
 
-A query is SIMPLE (is_complex=False) if:
-- It's a straightforward factual question
-- The answer is likely in a single document/source
-- It can be answered with a single search
+A query is COMPLEX (is_complex=True) — needs retrieval — if it asks about ANY
+specific fact, entity, name, number, spec, detail, relationship, or content that
+could plausibly be found in the documents. This includes single-fact questions.
+When in doubt, choose COMPLEX.
+
+A query is SIMPLE (is_complex=False) — NO retrieval — ONLY if it is clearly NOT
+about the documents at all:
+- Greetings / small talk ("hi", "thanks", "how are you")
+- Meta questions about you, the assistant, or how to use the system
+- General world knowledge with no connection to the user's documents
 
 User query: {query}
 
@@ -35,10 +39,8 @@ async def orchestrator_node(
     state: AgentRAGState, *, config: RunnableConfig
 ) -> Command | dict:
     """Orchestrator: assess complexity and route accordingly."""
-    llm = get_llm()
-
     prompt = ORCHESTRATOR_PROMPT.format(query=state["query"])
-    result: OrchestratorResult = await llm.with_structured_output(
+    result: OrchestratorResult = await get_structured_llm(
         OrchestratorResult
     ).ainvoke(prompt)
 

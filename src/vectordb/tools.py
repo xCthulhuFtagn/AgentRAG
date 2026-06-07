@@ -14,6 +14,7 @@ async def vector_search(
     query: str,
     collection: str,
     top_k: int = 5,
+    db_path: str | None = None,
 ) -> dict:
     """Search a LanceDB collection by vector similarity.
 
@@ -24,11 +25,13 @@ async def vector_search(
         query: The search query text (will be embedded).
         collection: Name of the LanceDB table/collection to search.
         top_k: Number of top results to return (default 5).
+        db_path: Optional LanceDB path to scope the search (per-project isolation).
+            None → global LANCE_DB_PATH.
 
     Returns:
         Dict with keys: collection, query, chunks (list of text), scores (list of distances).
     """
-    db = await get_async_db()
+    db = await get_async_db(db_path)
     try:
         table = await db.open_table(collection)
     except Exception:
@@ -41,7 +44,9 @@ async def vector_search(
         }
 
     query_embedding = await embed(query)
-    results = await table.search(query_embedding).limit(top_k).to_list()
+    # Async LanceDB: search() is a coroutine — await it before chaining.
+    search_query = await table.search(query_embedding)
+    results = await search_query.limit(top_k).to_list()
 
     return {
         "collection": collection,
@@ -52,14 +57,18 @@ async def vector_search(
 
 
 @tool
-async def list_collections() -> list[str]:
+async def list_collections(db_path: str | None = None) -> list[str]:
     """List all available LanceDB collections (tables).
 
     Use this to discover what document sources are available before searching.
     The Planner should call this first to decide where to route queries.
 
+    Args:
+        db_path: Optional LanceDB path to scope the listing (per-project isolation).
+            None → global LANCE_DB_PATH.
+
     Returns:
         List of collection/table names.
     """
-    db = await get_async_db()
+    db = await get_async_db(db_path)
     return await db.table_names()

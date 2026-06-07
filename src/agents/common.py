@@ -19,3 +19,16 @@ def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI:
         base_url=DEEPSEEK_BASE_URL,
         temperature=temperature,
     )
+
+
+def get_structured_llm(schema, temperature: float = 0.0):
+    """LLM that returns a validated Pydantic object.
+
+    Uses method="function_calling" — DeepSeek's API does not support the
+    json_schema `response_format` that with_structured_output() picks by
+    default (returns 'This response_format type is unavailable now').
+    Function calling is the OpenAI-compatible path DeepSeek does support.
+    """
+    return get_llm(temperature).with_structured_output(
+        schema, method="function_calling"
+    )
