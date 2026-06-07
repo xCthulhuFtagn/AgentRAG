@@ -185,7 +185,7 @@ def index():
         frozen = bool(pid) and runtime.is_frozen(pid)
         base = (
             "chat-panel w-full max-w-xl h-full flex flex-col gap-2 "
-            "p-3 rounded-lg border"
+            "p-3 rounded-lg border min-w-0"
         )
         with ui.column().classes(base + (" frozen" if frozen else "")):
             if frozen:
@@ -203,8 +203,8 @@ def index():
                 with ui.row().classes("items-center gap-2"):
                     ui.spinner(size="sm")
                     ui.label("Reindexing… chat frozen").classes("text-blue-700")
-            with ui.scroll_area().classes("grow w-full"):
-                with ui.column().classes("w-full gap-2"):
+            with ui.scroll_area().classes("grow w-full min-w-0"):
+                with ui.column().classes("w-full gap-2 min-w-0"):
                     messages_view()
             with ui.row().classes("w-full no-wrap items-center"):
                 inp = (
@@ -226,7 +226,7 @@ def index():
                 f"<div class='chat-bubble-user'>{html.escape(m['text'])}</div>"
             ).classes("w-full flex justify-end")
         else:
-            with ui.column().classes("w-full gap-1"):
+            with ui.column().classes("w-full gap-1 min-w-0"):
                 for t in m.get("trace", []):
                     agent = html.escape(str(t.get("agent", "")))
                     decision = html.escape(str(t.get("decision", "")))

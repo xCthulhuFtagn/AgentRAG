@@ -113,3 +113,14 @@ body,
   align-self: flex-start;
   max-width: 90%;
 }
+
+/* Keep chat content inside the panel: wrap long text, never scroll sideways. */
+.chat-bubble-user,
+.chat-bubble-assistant,
+.chat-bubble-assistant *,
+.trace-step {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  max-width: 100%;
+}
