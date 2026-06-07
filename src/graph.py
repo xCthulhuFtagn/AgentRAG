@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.state import AgentRAGState
+from src.agents.common import logged_node
 from src.agents.orchestrator import orchestrator_node
 from src.agents.planner import planner_node
 from src.agents.query_rewriter import query_rewriter_node
@@ -64,13 +65,19 @@ def build_graph() -> StateGraph:
     """
     workflow = StateGraph(AgentRAGState)
 
-    workflow.add_node("orchestrator", orchestrator_node)
-    workflow.add_node("planner", planner_node)
-    workflow.add_node("query_rewriter", query_rewriter_node)
-    workflow.add_node("search_fanout", search_fanout_node)
-    workflow.add_node("sufficient_context", sufficient_context_node)
-    workflow.add_node("synthesis", synthesis_node)
-    workflow.add_node("give_up", give_up_node)
+    # logged_node wraps each node so its trace entries are emitted as logs —
+    # one choke point, identical under CLI and web.
+    nodes = {
+        "orchestrator": orchestrator_node,
+        "planner": planner_node,
+        "query_rewriter": query_rewriter_node,
+        "search_fanout": search_fanout_node,
+        "sufficient_context": sufficient_context_node,
+        "synthesis": synthesis_node,
+        "give_up": give_up_node,
+    }
+    for name, node in nodes.items():
+        workflow.add_node(name, logged_node(node))
 
     workflow.set_entry_point("orchestrator")
 

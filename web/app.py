@@ -12,10 +12,13 @@ from pathlib import Path
 
 from nicegui import ui, events
 
+from src.logging_setup import setup_logging
 from src.vectordb.indexer import SUPPORTED_SUFFIXES
 from web import runtime
 from web.chat import run_chat
 from web.indexing import reindex_project
+
+setup_logging()  # node decisions → console, same logs as the CLI
 
 STORE = runtime.STORE
 CSS = (Path(__file__).parent / "static" / "style.css").read_text(encoding="utf-8")

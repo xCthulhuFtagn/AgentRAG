@@ -1,10 +1,38 @@
 """Common utilities shared across all agents."""
 
+import functools
+import logging
 from functools import lru_cache
 
 from langchain_openai import ChatOpenAI
+from langgraph.types import Command
 
 from src.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+
+log = logging.getLogger("agentrag.node")
+
+
+def logged_node(fn):
+    """Wrap a graph node so its trace entries are emitted as log records.
+
+    Every node already builds `trace` entries via `make_trace_entry` and returns
+    them in its `Command.update` (or plain dict). This decorator is the single
+    point that turns those entries into logs — node bodies stay untouched, and
+    the same logs appear under the CLI and the web app.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(state, **kwargs):
+        result = await fn(state, **kwargs)
+        update = result.update if isinstance(result, Command) else result
+        if isinstance(update, dict):
+            for entry in update.get("trace", []):
+                detail = entry.get("detail", "")
+                suffix = f" — {detail[:200]}" if detail else ""
+                log.info("[%s] %s%s", entry["agent"], entry["decision"], suffix)
+        return result
+
+    return wrapper
 
 
 @lru_cache(maxsize=4)

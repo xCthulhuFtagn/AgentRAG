@@ -45,6 +45,7 @@ orchestrator ──simple──► synthesis ──► END
 - **Only vector search tools** — `vector_search` and `list_collections` via LanceDB; no web/Wikipedia APIs
 - **Honest refusal** — Give Up node builds a system-generated message (no LLM) listing what was found, what's missing, and why
 - **Structured output via function calling** — `get_structured_llm()` in `common.py` uses `with_structured_output(schema, method="function_calling")`. DeepSeek's API rejects the default json_schema `response_format` ("This response_format type is unavailable now").
+- **Logging** — `logged_node` decorator (in `common.py`, applied centrally in `build_graph`) is the single point that emits each node's `trace` entries as `logging` records under the `agentrag` logger. `setup_logging()` (`src/logging_setup.py`) is called by both `src/main.py` and `web/app.py`, so node decisions appear identically under CLI and web. `main.py` prints only the final answer (program output, not a log); the web UI's live trace stream is a separate channel.
 
 ## State accumulation & DB scope
 
