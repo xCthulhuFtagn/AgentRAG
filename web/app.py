@@ -12,6 +12,7 @@ from pathlib import Path
 
 from nicegui import ui, events
 
+from src.vectordb.indexer import SUPPORTED_SUFFIXES
 from web import runtime
 from web.chat import run_chat
 from web.indexing import reindex_project
@@ -393,8 +394,10 @@ def index():
             ui.notify(str(ex), color="negative")
             return
         ctx["edit"] = None
+        # Notify before trigger_reindex: it refreshes files_panel, which deletes
+        # this handler's slot — any ui.* call after that would crash.
+        ui.notify("Files saved — reindexing…", color="positive")
         await trigger_reindex(pid)
-        ui.notify("Files updated", color="positive")
 
     async def send_message(inp):
         pid = ctx["chat_pid"]
