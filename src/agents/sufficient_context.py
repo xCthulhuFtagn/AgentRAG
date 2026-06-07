@@ -5,10 +5,13 @@ Checks three things before allowing a response:
 2. Intermediate draft — can we answer from what we have?
 3. Missing pieces analysis — what EXACTLY is missing and where to look?
 
-Returns Command(goto="synthesis") if sufficient,
-Command(goto="query_rewriter") with specific feedback if insufficient.
+Routes:
+- sufficient → Command(goto="synthesis")
+- insufficient + iterations left → Command(goto="query_rewriter") with feedback
+- insufficient + max iterations → Command(goto=END) with system-generated refusal
 """
 
+from langgraph.graph import END
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
@@ -42,22 +45,75 @@ Analyze THREE things:
 Rules:
 - If ALL parts of the question can be answered from the context → sufficient=True
 - If ANY part is missing → sufficient=False, provide detailed feedback
-- If we've hit max iterations → sufficient=True (best effort, answer with what we have)
 - It's better to flag as insufficient and search again than to guess
+- Be honest — do NOT set sufficient=True if information is missing"""
 
-{max_iterations_note}"""
+
+def _build_refusal_answer(state: AgentRAGState, result: SufficientContextResult) -> str:
+    """Build a system-generated refusal message when context is exhausted.
+
+    No LLM involved — the system itself states what it found and what's missing.
+    """
+    query = state["query"]
+    iteration = state.get("iteration_count", 0)
+    max_iter = state.get("max_iterations", MAX_ITERATIONS)
+
+    # Summarize what was found
+    search_results = state.get("search_results", [])
+    found_collections: set[str] = set()
+    found_chunks = 0
+    for r in search_results:
+        chunks = r.get("chunks", [])
+        if chunks:
+            found_collections.add(r.get("collection", "unknown"))
+            found_chunks += len(chunks)
+
+    found_summary = ""
+    if found_collections:
+        found_summary = (
+            f"- Searched {len(found_collections)} collection(s): {', '.join(sorted(found_collections))}\n"
+            f"- Retrieved {found_chunks} text chunks total\n"
+        )
+    else:
+        found_summary = "- No relevant documents were found in any collection\n"
+
+    # What's missing
+    missing = result.missing_parts or ["specific information required to answer the question"]
+    missing_str = "\n".join(f"  • {m}" for m in missing)
+
+    # Search attempts
+    queries_tried = state.get("rewritten_queries", [])
+    queries_str = "\n".join(f"  • {q}" for q in queries_tried[-10:]) or "  (none)"
+
+    return (
+        f"## Unable to fully answer\n\n"
+        f"**Question:** {query}\n\n"
+        f"**What was found:**\n{found_summary}\n"
+        f"**What is missing:**\n{missing_str}\n\n"
+        f"**Why:** {result.reason}\n\n"
+        f"**Search attempts ({iteration}/{max_iter} iterations):**\n{queries_str}\n\n"
+        f"**Recommendation:** The requested information may not exist in the indexed "
+        f"documents. Try rephrasing the query, indexing additional documents, "
+        f"or breaking the question into smaller parts."
+    )
 
 
 async def sufficient_context_node(
     state: AgentRAGState, *, config: RunnableConfig
 ) -> Command:
-    """Sufficient Context: check completeness, command next step."""
+    """Sufficient Context: check completeness, command next step.
+
+    Three outcomes:
+    1. sufficient=True  → Command(goto="synthesis")      — normal answer
+    2. insufficient + iterations left → Command(goto="query_rewriter") — search more
+    3. insufficient + max iterations  → Command(goto=END) — system refusal
+    """
     llm = get_llm()
 
     max_iter = state.get("max_iterations", MAX_ITERATIONS)
     iteration = state.get("iteration_count", 0)
 
-    # Format search results for the prompt
+    # Format search results
     search_results = state.get("search_results", [])
     results_str = ""
     for i, r in enumerate(search_results[-10:]):
@@ -70,30 +126,17 @@ async def sufficient_context_node(
     if not results_str:
         results_str = "(No search results yet)"
 
-    max_iterations_note = ""
-    if iteration >= max_iter:
-        max_iterations_note = (
-            "\nIMPORTANT: Maximum iterations reached. You MUST set sufficient=True "
-            "and provide the best possible answer with available context."
-        )
-
     prompt = SUFFICIENT_CONTEXT_PROMPT.format(
         query=state["query"],
         search_results=results_str,
         iteration=iteration,
         max_iterations=max_iter,
         previous_gaps=", ".join(state.get("missing_parts", [])) or "(none)",
-        max_iterations_note=max_iterations_note,
     )
 
     result: SufficientContextResult = await llm.with_structured_output(
         SufficientContextResult
     ).ainvoke(prompt)
-
-    # Force sufficient if max iterations reached
-    if iteration >= max_iter:
-        result.sufficient = True
-        result.reason = f"Max iterations ({max_iter}) reached. " + result.reason
 
     trace_entry = make_trace_entry(
         agent="sufficient_context",
@@ -105,6 +148,7 @@ async def sufficient_context_node(
         ),
     )
 
+    # ── Outcome 1: context is sufficient → normal answer ──
     if result.sufficient:
         return Command(
             goto="synthesis",
@@ -115,7 +159,9 @@ async def sufficient_context_node(
                 "trace": [trace_entry],
             },
         )
-    else:
+
+    # ── Outcome 2: insufficient, but iterations left → search more ──
+    if iteration < max_iter:
         return Command(
             goto="query_rewriter",
             update={
@@ -128,3 +174,22 @@ async def sufficient_context_node(
                 "trace": [trace_entry],
             },
         )
+
+    # ── Outcome 3: insufficient + no iterations left → system refusal ──
+    refusal = _build_refusal_answer(state, result)
+
+    trace_entry2 = make_trace_entry(
+        agent="sufficient_context",
+        decision="give_up",
+        detail=f"max_iterations={max_iter} reached, context insufficient",
+    )
+
+    return Command(
+        goto=END,
+        update={
+            "sufficient": False,
+            "sufficient_reason": result.reason,
+            "final_answer": refusal,
+            "trace": [trace_entry, trace_entry2],
+        },
+    )

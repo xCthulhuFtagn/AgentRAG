@@ -34,29 +34,29 @@ def build_graph() -> StateGraph:
                 └⟶ Command(goto="query_rewriter")
                       │
                       ▼
-                  query_rewriter ◄──────────────┐
-                      │                         │
-                      └⟶ Command(goto="search")  │
-                            │                    │
-                            ▼                    │
-                        search_fanout            │
-                            │                    │
-                            └⟶ Command(          │
-                                goto=            │
-                                "sufficient")    │
-                                  │              │
-                                  ▼              │
-                          sufficient_context ────┘
-                            │        insufficient:
+                  query_rewriter ◄────────────────┐
+                      │                           │
+                      └⟶ Command(goto="search")    │
+                            │                      │
+                            ▼                      │
+                        search_fanout              │
+                            │                      │
+                            └⟶ Command(goto=       │
+                                "sufficient")      │
+                                  │                │
+                                  ▼                │
+                          sufficient_context ──────┘
+                            │        insufficient + iters left:
                             │        Command(goto="query_rewriter")
                             │
-                            └⟶ sufficient:
-                               Command(goto="synthesis")
-                                    │
-                                    ▼
-                                synthesis
-                                    │
-                                    └⟶ Command(goto=END)
+                            ├⟶ sufficient:
+                            │  Command(goto="synthesis")
+                            │     │
+                            │     ▼
+                            │  synthesis → Command(goto=END)
+                            │
+                            └⟶ insufficient + max iters:
+                               Command(goto=END)  ← system refusal
     """
     workflow = StateGraph(AgentRAGState)
 
