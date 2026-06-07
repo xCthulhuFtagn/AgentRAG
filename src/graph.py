@@ -15,6 +15,7 @@ from src.agents.query_rewriter import query_rewriter_node
 from src.agents.search_fanout import search_fanout_node
 from src.agents.sufficient_context import sufficient_context_node
 from src.agents.synthesis import synthesis_node
+from src.agents.give_up import give_up_node
 
 
 def build_graph() -> StateGraph:
@@ -56,7 +57,10 @@ def build_graph() -> StateGraph:
                             │  synthesis → Command(goto=END)
                             │
                             └⟶ insufficient + max iters:
-                               Command(goto=END)  ← system refusal
+                               Command(goto="give_up")
+                                  │
+                                  ▼
+                               give_up → Command(goto=END)
     """
     workflow = StateGraph(AgentRAGState)
 
@@ -66,6 +70,7 @@ def build_graph() -> StateGraph:
     workflow.add_node("search_fanout", search_fanout_node)
     workflow.add_node("sufficient_context", sufficient_context_node)
     workflow.add_node("synthesis", synthesis_node)
+    workflow.add_node("give_up", give_up_node)
 
     workflow.set_entry_point("orchestrator")
 

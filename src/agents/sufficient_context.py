@@ -8,10 +8,9 @@ Checks three things before allowing a response:
 Routes:
 - sufficient → Command(goto="synthesis")
 - insufficient + iterations left → Command(goto="query_rewriter") with feedback
-- insufficient + max iterations → Command(goto=END) with system-generated refusal
+- insufficient + max iterations → Command(goto="give_up")
 """
 
-from langgraph.graph import END
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
@@ -49,55 +48,6 @@ Rules:
 - Be honest — do NOT set sufficient=True if information is missing"""
 
 
-def _build_refusal_answer(state: AgentRAGState, result: SufficientContextResult) -> str:
-    """Build a system-generated refusal message when context is exhausted.
-
-    No LLM involved — the system itself states what it found and what's missing.
-    """
-    query = state["query"]
-    iteration = state.get("iteration_count", 0)
-    max_iter = state.get("max_iterations", MAX_ITERATIONS)
-
-    # Summarize what was found
-    search_results = state.get("search_results", [])
-    found_collections: set[str] = set()
-    found_chunks = 0
-    for r in search_results:
-        chunks = r.get("chunks", [])
-        if chunks:
-            found_collections.add(r.get("collection", "unknown"))
-            found_chunks += len(chunks)
-
-    found_summary = ""
-    if found_collections:
-        found_summary = (
-            f"- Searched {len(found_collections)} collection(s): {', '.join(sorted(found_collections))}\n"
-            f"- Retrieved {found_chunks} text chunks total\n"
-        )
-    else:
-        found_summary = "- No relevant documents were found in any collection\n"
-
-    # What's missing
-    missing = result.missing_parts or ["specific information required to answer the question"]
-    missing_str = "\n".join(f"  • {m}" for m in missing)
-
-    # Search attempts
-    queries_tried = state.get("rewritten_queries", [])
-    queries_str = "\n".join(f"  • {q}" for q in queries_tried[-10:]) or "  (none)"
-
-    return (
-        f"## Unable to fully answer\n\n"
-        f"**Question:** {query}\n\n"
-        f"**What was found:**\n{found_summary}\n"
-        f"**What is missing:**\n{missing_str}\n\n"
-        f"**Why:** {result.reason}\n\n"
-        f"**Search attempts ({iteration}/{max_iter} iterations):**\n{queries_str}\n\n"
-        f"**Recommendation:** The requested information may not exist in the indexed "
-        f"documents. Try rephrasing the query, indexing additional documents, "
-        f"or breaking the question into smaller parts."
-    )
-
-
 async def sufficient_context_node(
     state: AgentRAGState, *, config: RunnableConfig
 ) -> Command:
@@ -106,7 +56,7 @@ async def sufficient_context_node(
     Three outcomes:
     1. sufficient=True  → Command(goto="synthesis")      — normal answer
     2. insufficient + iterations left → Command(goto="query_rewriter") — search more
-    3. insufficient + max iterations  → Command(goto=END) — system refusal
+    3. insufficient + max iterations  → Command(goto="give_up") — system refusal
     """
     llm = get_llm()
 
@@ -175,21 +125,13 @@ async def sufficient_context_node(
             },
         )
 
-    # ── Outcome 3: insufficient + no iterations left → system refusal ──
-    refusal = _build_refusal_answer(state, result)
-
-    trace_entry2 = make_trace_entry(
-        agent="sufficient_context",
-        decision="give_up",
-        detail=f"max_iterations={max_iter} reached, context insufficient",
-    )
-
+    # ── Outcome 3: insufficient + no iterations left → give up ──
     return Command(
-        goto=END,
+        goto="give_up",
         update={
             "sufficient": False,
             "sufficient_reason": result.reason,
-            "final_answer": refusal,
-            "trace": [trace_entry, trace_entry2],
+            "missing_parts": result.missing_parts,
+            "trace": [trace_entry],
         },
     )
