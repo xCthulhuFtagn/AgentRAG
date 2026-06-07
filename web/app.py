@@ -246,14 +246,16 @@ def index():
         chat_panel.refresh()
 
     async def handle_upload(pid, e: events.UploadEventArguments):
-        content = e.content.read()
+        # NiceGUI 3.x: e.file is a FileUpload; .name + async .read().
+        name = e.file.name
         try:
-            STORE.add_file(pid, e.name, content)
+            content = await e.file.read()
+            STORE.add_file(pid, name, content)
         except ValueError as ex:
             ui.notify(str(ex), color="negative")
             return
         await trigger_reindex(pid)
-        ui.notify(f"Indexed {e.name}", color="positive")
+        ui.notify(f"Indexed {name}", color="positive")
 
     async def rename_file_dialog(pid, old):
         with ui.dialog() as dialog, ui.card():
