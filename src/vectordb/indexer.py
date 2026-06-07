@@ -11,6 +11,8 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
+import re
 import sys
 from functools import lru_cache
 from pathlib import Path
@@ -26,6 +28,46 @@ DOC_SUFFIXES = {".pdf", ".docx", ".pptx"}
 # Plain-text formats read directly.
 TEXT_SUFFIXES = {".txt", ".md"}
 SUPPORTED_SUFFIXES = DOC_SUFFIXES | TEXT_SUFFIXES
+
+# Cyrillic → Latin (RU/UK) so non-ASCII filenames stay readable as table names.
+_CYRILLIC_MAP = {
+    "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "yo",
+    "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
+    "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
+    "ф": "f", "х": "kh", "ц": "ts", "ч": "ch", "ш": "sh", "щ": "shch",
+    "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+    "і": "i", "ї": "yi", "є": "ye", "ґ": "g",
+}
+
+
+def _transliterate(s: str) -> str:
+    """Map Cyrillic letters to Latin; leave everything else untouched."""
+    out = []
+    for ch in s:
+        mapped = _CYRILLIC_MAP.get(ch.lower())
+        if mapped is None:
+            out.append(ch)
+        elif ch.isupper() and mapped:
+            out.append(mapped.capitalize())
+        else:
+            out.append(mapped)
+    return "".join(out)
+
+
+def safe_table_name(stem: str) -> str:
+    """Turn a file stem into a LanceDB-valid table name.
+
+    LanceDB allows only [A-Za-z0-9._-]. We transliterate Cyrillic (to keep the
+    name readable for the Planner), replace any remaining disallowed character
+    with '_', and fall back to a hashed name if nothing usable remains.
+    """
+    name = _transliterate(stem)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", name)
+    name = re.sub(r"_+", "_", name).strip("._-")
+    if not name or not any(c.isalnum() for c in name):
+        digest = hashlib.md5(stem.encode("utf-8")).hexdigest()[:8]
+        name = f"doc_{digest}"
+    return name
 
 
 @lru_cache(maxsize=1)
@@ -85,8 +127,15 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
 
     print(f"Found {len(files)} file(s) to index\n")
 
+    used: set[str] = set()
     for file_path in files:
-        table_name = file_path.stem.replace(" ", "_").replace("-", "_").replace(".", "_")
+        base = safe_table_name(file_path.stem)
+        table_name = base
+        if table_name in used:
+            # Two different files sanitized to the same name — disambiguate.
+            digest = hashlib.md5(file_path.name.encode("utf-8")).hexdigest()[:6]
+            table_name = f"{base}_{digest}"
+        used.add(table_name)
         print(f"  Indexing: {file_path.name} → table '{table_name}'")
 
         try:
