@@ -134,12 +134,15 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 ### How it's stored on disk
 
 ```
-data/lancedb/{project_id}/          # web: one isolated DB per project
-└── {table}.lance/                  # one table (Lance dataset) per file
-    ├── data/ … (columnar fragments: text + 384-d vector)
-    └── _versions, _transactions     # Lance manifest (versioned, ACID)
-lancedb_data/                        # CLI default (LANCE_DB_PATH), shared/global
+data/
+├── projects/{project_id}/          # web: meta.json + uploaded files/
+├── lancedb/{project_id}/           # web: one isolated DB per project
+│   └── {table}.lance/              # one table (Lance dataset) per file
+│       ├── data/ … (columnar fragments: text + 384-d vector)
+│       └── _versions, _transactions  # Lance manifest (versioned, ACID)
+└── lancedb/_cli/                   # CLI default (LANCE_DB_PATH) — same data/ root
 ```
+Everything lives under `data/` (created automatically). The CLI's global DB is just another dir under `data/lancedb/` (`_cli`), kept apart from per-project DBs whose names are project UUIDs.
 
 ### How it's queried
 
@@ -160,6 +163,6 @@ Copy settings from VSCode user settings or set in `.env`:
 DEEPSEEK_API_KEY=sk-...
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat
-LANCE_DB_PATH=./lancedb_data
+LANCE_DB_PATH=./data/lancedb/_cli
 MAX_ITERATIONS=3
 ```

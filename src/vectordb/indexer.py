@@ -6,7 +6,7 @@ Text extraction is hybrid:
 
 Usage:
     python -m src.vectordb.indexer --dir docs/sample_docs
-    python -m src.vectordb.indexer --dir docs/sample_docs --db ./lancedb_data
+    python -m src.vectordb.indexer --dir docs/sample_docs --db ./data/lancedb/_cli
 """
 
 import argparse
