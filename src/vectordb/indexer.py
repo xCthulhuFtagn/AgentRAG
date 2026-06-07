@@ -89,22 +89,36 @@ def extract_text(file_path: Path) -> str:
     raise ValueError(f"Unsupported file type: {ext}")
 
 
-def split_text(text: str, chunk_size: int = 500, overlap: int = 50) -> list[str]:
-    """Simple overlapping chunk splitter."""
-    chunks = []
-    start = 0
-    text_len = len(text)
+def clean_text(text: str) -> str:
+    """Normalize extracted text before chunking.
 
-    while start < text_len:
-        end = min(start + chunk_size, text_len)
-        chunk = text[start:end].strip()
-        if chunk:
-            chunks.append(chunk)
-        if end >= text_len:
-            break
-        start = end - overlap
+    Parsers (esp. PDF) emit ragged whitespace: per-line indentation, runs of
+    blank lines, double spaces. Collapse them so chunk boundaries land on real
+    paragraph/sentence breaks instead of inside the noise.
+    """
+    lines = [ln.strip() for ln in text.splitlines()]
+    text = "\n".join(lines)
+    text = re.sub(r"\n{3,}", "\n\n", text)   # 3+ newlines → one paragraph break
+    text = re.sub(r"[ \t]{2,}", " ", text)   # collapse runs of spaces/tabs
+    return text.strip()
 
-    return chunks
+
+def split_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:
+    """Boundary-aware chunking — never cuts mid-word/sentence.
+
+    Cleans the text, then splits recursively on paragraph → line → sentence →
+    word boundaries (RecursiveCharacterTextSplitter), keeping ~chunk_size chars
+    with `overlap` carried between chunks for context continuity.
+    """
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=overlap,
+        separators=["\n\n", "\n", ". ", "? ", "! ", "; ", " ", ""],
+        keep_separator=True,
+    )
+    return [c.strip() for c in splitter.split_text(clean_text(text)) if c.strip()]
 
 
 async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
@@ -148,7 +162,7 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
             print(f"    Warning: no text extracted")
             continue
 
-        chunks = split_text(text, chunk_size=500, overlap=50)
+        chunks = split_text(text)
         print(f"    {len(chunks)} chunks, embedding...")
 
         embeddings = await embed_batch(chunks)

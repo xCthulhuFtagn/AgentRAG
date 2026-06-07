@@ -62,7 +62,7 @@ orchestrator ──simple──► synthesis ──► END
 - `embeddings.py` — FastEmbed (ONNX, `BAAI/bge-small-en-v1.5`, **384d**); `embed`/`embed_batch` run sync ONNX off the loop via `asyncio.to_thread`; model cached `@lru_cache`.
 - `client.py` — `get_async_db(db_path)` / `get_sync_db(db_path)`; `db_path or LANCE_DB_PATH`.
 - `tools.py` — `vector_search(query, collection, top_k, db_path)` and `list_collections(db_path)` as LangChain `@tool`s. **Async LanceDB gotcha**: `search()` is a coroutine — `q = await table.search(vec)` then `await q.limit(k).to_list()`. Returns chunk `text` + `_distance` (L2, default metric).
-- `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `split_text(500, overlap=50)` → `embed_batch` → rows `{text, vector}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`.
+- `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `clean_text` (collapse ragged whitespace) → `split_text` (RecursiveCharacterTextSplitter, ~1000 chars / 150 overlap, splits on para→line→sentence→word, never mid-word) → `embed_batch` → rows `{text, vector}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`.
 
 **Schema & layout:** one **file → one table** (collection); rows are `{text: str, vector: float[384]}`. Table name = sanitized file stem via `safe_table_name()` (LanceDB allows only `[A-Za-z0-9._-]`; Cyrillic transliterated, hash fallback, collisions disambiguated). Per run each table is `drop_table` + `create_table` (no incremental upsert). No ANN index built → exhaustive search (fine at doc scale).
 
