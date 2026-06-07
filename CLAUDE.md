@@ -56,13 +56,17 @@ orchestrator ──simple──► synthesis ──► END
 
 `planner` builds one route per relevant collection; `query_rewriter` emits one `search_task` per route; `search_fanout` searches every `(collection, query)` pair in parallel (`asyncio.gather`). This is what makes cross-file multi-hop work.
 
-## vectordb module
+## Vector DB (LanceDB)
 
-Self-contained at `src/vectordb/`:
-- `embeddings.py` — FastEmbed (ONNX, BAAI/bge-small-en-v1.5, 384d)
-- `client.py` — LanceDB async/sync connections (`get_async_db(db_path)`)
-- `tools.py` — `@tool` wrappers; **async LanceDB**: `await table.search(vec)` then `.limit().to_list()`
-- `indexer.py` — hybrid text extraction: LiteParse for PDF/DOCX/PPTX, `read_text()` for TXT/MD. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`
+**LanceDB** — embedded/serverless (no DB process), stores Lance columnar files on disk, async, persists across restarts. Self-contained module at `src/vectordb/`:
+- `embeddings.py` — FastEmbed (ONNX, `BAAI/bge-small-en-v1.5`, **384d**); `embed`/`embed_batch` run sync ONNX off the loop via `asyncio.to_thread`; model cached `@lru_cache`.
+- `client.py` — `get_async_db(db_path)` / `get_sync_db(db_path)`; `db_path or LANCE_DB_PATH`.
+- `tools.py` — `vector_search(query, collection, top_k, db_path)` and `list_collections(db_path)` as LangChain `@tool`s. **Async LanceDB gotcha**: `search()` is a coroutine — `q = await table.search(vec)` then `await q.limit(k).to_list()`. Returns chunk `text` + `_distance` (L2, default metric).
+- `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `split_text(500, overlap=50)` → `embed_batch` → rows `{text, vector}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`.
+
+**Schema & layout:** one **file → one table** (collection); rows are `{text: str, vector: float[384]}`. Table name = sanitized file stem via `safe_table_name()` (LanceDB allows only `[A-Za-z0-9._-]`; Cyrillic transliterated, hash fallback, collisions disambiguated). Per run each table is `drop_table` + `create_table` (no incremental upsert). No ANN index built → exhaustive search (fine at doc scale).
+
+**Storage & isolation:** CLI uses global `LANCE_DB_PATH` (`./lancedb_data`). Web gives each project its own dir `data/lancedb/{project_id}/` and threads that `db_path` through state → `vector_search`/`list_collections`, so a project searches only its own files. Reindex = wipe `data/lancedb/{id}` + rebuild from current files (keeps index consistent with deletes/renames). Data persists between runs.
 
 ## web module (NiceGUI)
 

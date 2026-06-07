@@ -120,6 +120,38 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
 6. Give Up node builds an honest refusal: what was found, what's missing, why
 
+## Vector store (LanceDB)
+
+**Why LanceDB:** embedded and serverless — no separate database process. It stores data as [Lance](https://lancedb.github.io/lance/) columnar files directly on disk, so it works offline / air-gapped and persists across restarts. All access is async.
+
+### How documents become vectors
+
+1. **Extract** text — hybrid: LiteParse (Rust) for `.pdf/.docx/.pptx`, direct `read_text()` for `.txt/.md` ([indexer.py](src/vectordb/indexer.py)).
+2. **Chunk** — overlapping windows of `chunk_size=500` chars, `overlap=50`.
+3. **Embed** — FastEmbed `BAAI/bge-small-en-v1.5` (ONNX, **384 dims**), batched, run off the event loop via `asyncio.to_thread` ([embeddings.py](src/vectordb/embeddings.py)).
+4. **Store** — each chunk is a row `{text, vector}`. **One file → one table** (a "collection"). The table name is the file stem, sanitized to LanceDB's allowed charset (Cyrillic transliterated → `big_statya`, hash fallback otherwise).
+
+### How it's stored on disk
+
+```
+data/lancedb/{project_id}/          # web: one isolated DB per project
+└── {table}.lance/                  # one table (Lance dataset) per file
+    ├── data/ … (columnar fragments: text + 384-d vector)
+    └── _versions, _transactions     # Lance manifest (versioned, ACID)
+lancedb_data/                        # CLI default (LANCE_DB_PATH), shared/global
+```
+
+### How it's queried
+
+- `get_async_db(db_path)` opens a connection scoped to one directory ([client.py](src/vectordb/client.py)). The `db_path` is threaded from graph state, so each project searches **only its own DB** (isolation).
+- `vector_search(query, collection, top_k, db_path)` embeds the query, then `await table.search(vec)` → `.limit(top_k).to_list()`, returning the chunk texts and `_distance` scores (L2, LanceDB default). `list_collections(db_path)` returns the table names so the Planner knows which files exist ([tools.py](src/vectordb/tools.py)).
+- Search is exhaustive (no ANN index is built) — fine at document scale; add `table.create_index()` if a corpus grows large.
+
+### Reindexing & persistence
+
+- Editing a project's files commits a batch, then **reindexes**: the project's `data/lancedb/{id}` dir is wiped and rebuilt from the current files ([indexing.py](web/indexing.py)). This keeps the index consistent with deletes/renames. Each table is also `drop_table`-then-`create_table` on every run.
+- Data persists between runs — restart the app/CLI and the tables are still there. Deleting a project removes both its files and its LanceDB dir.
+
 ## Configuration
 
 Copy settings from VSCode user settings or set in `.env`:
