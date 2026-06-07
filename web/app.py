@@ -245,9 +245,27 @@ def index():
         files_panel.refresh()
         chat_panel.refresh()
 
+    async def confirm_replace(name) -> bool:
+        with ui.dialog() as dialog, ui.card():
+            ui.label(f"File '{name}' already exists.").classes("font-bold")
+            ui.label("Replace the existing file?").classes("text-sm text-gray-500")
+            with ui.row():
+                ui.button(
+                    "Keep existing", on_click=lambda: dialog.submit(False)
+                ).props("flat")
+                ui.button(
+                    "Replace", on_click=lambda: dialog.submit(True)
+                ).props("color=primary")
+        return bool(await dialog)
+
     async def handle_upload(pid, e: events.UploadEventArguments):
         # NiceGUI 3.x: e.file is a FileUpload; .name + async .read().
         name = e.file.name
+        # Same-name upload → ask before overwriting; "no" = don't save.
+        if STORE.file_exists(pid, name):
+            if not await confirm_replace(name):
+                ui.notify(f"Kept existing {name}", color="warning")
+                return
         try:
             content = await e.file.read()
             STORE.add_file(pid, name, content)

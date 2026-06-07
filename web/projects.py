@@ -107,6 +107,10 @@ class ProjectStore:
         files.sort(key=lambda f: f["name"].lower())
         return files
 
+    def file_exists(self, pid: str, filename: str) -> bool:
+        """Whether a file with this name is already uploaded to the project."""
+        return (self.files_dir(pid) / Path(filename).name).exists()
+
     def add_file(self, pid: str, filename: str, content: bytes) -> None:
         """Save an uploaded file. Raises ValueError on unsupported suffix."""
         name = Path(filename).name  # strip any path components
