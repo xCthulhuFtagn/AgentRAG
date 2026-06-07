@@ -22,6 +22,23 @@ CSS = (Path(__file__).parent / "static" / "style.css").read_text(encoding="utf-8
 ACCEPT = ".pdf,.docx,.pptx,.txt,.md"
 
 
+def _snowflakes_html(n: int = 14) -> str:
+    """Build a snow overlay — n flakes with varied position/size/speed."""
+    flakes = []
+    for i in range(n):
+        left = (i * 67 + 5) % 100
+        duration = 4 + (i % 5)            # 4–8s
+        delay = round((i % 7) * 0.6, 1)   # 0–3.6s
+        size = round(0.7 + (i % 4) * 0.35, 2)  # 0.7–1.75rem
+        char = "❄" if i % 2 == 0 else "❅"
+        flakes.append(
+            f"<span class='snowflake' style='left:{left}%;"
+            f"animation-duration:{duration}s;animation-delay:{delay}s;"
+            f"font-size:{size}rem;'>{char}</span>"
+        )
+    return "".join(flakes)
+
+
 def index():
     """Root page — runs per client connection (per-client state via closures)."""
     ui.colors(primary="#16a34a")
@@ -124,6 +141,8 @@ def index():
         frozen = bool(pid) and runtime.is_frozen(pid)
         base = "w-full h-full flex flex-col gap-2 p-3 rounded-lg border"
         with ui.column().classes(base + (" frozen" if frozen else "")):
+            if frozen:
+                ui.html(_snowflakes_html()).classes("snowflakes")
             if not pid:
                 ui.label("Open a project in chat to start").classes("text-gray-400")
                 return
