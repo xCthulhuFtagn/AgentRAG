@@ -1,0 +1,34 @@
+Server Hardware Catalog — Infrastructure Team
+
+SRV-7742 Specifications:
+  Model: Dell PowerEdge R760
+  CPU: 2x Intel Xeon Gold 6448Y (32 cores each, 64 threads total)
+  Base clock: 2.1 GHz, Max turbo: 4.1 GHz
+  RAM: 512 GB DDR5-4800 ECC (16x 32GB modules)
+  Storage:
+    - 2x 480GB SSD (mirrored, boot)
+    - 8x 3.84TB NVMe U.2 (data, RAID 10, 15.36TB usable)
+  Network:
+    - 2x 25GbE SFP28 (primary data)
+    - 2x 1GbE RJ45 (management)
+  GPU: NVIDIA A100 80GB PCIe
+  Power: Dual 1400W redundant PSU
+  Form factor: 2U rack-mount
+  Warranty: expires March 2027
+
+SRV-8850 Specifications:
+  Model: Dell PowerEdge R7625
+  CPU: 2x AMD EPYC 9654 (96 cores each, 192 threads total)
+  RAM: 768 GB DDR5-4800 ECC
+  Storage: 12x 7.68TB NVMe U.3 (RAID 10, 46TB usable)
+  Network: 4x 100GbE QSFP28
+  GPU: 2x NVIDIA H100 80GB PCIe
+  Power: Dual 2400W redundant PSU
+
+SRV-9921 Specifications:
+  Model: HPE ProLiant DL380 Gen11
+  CPU: 2x Intel Xeon Gold 6444Y (16 cores each)
+  RAM: 256 GB DDR5-4800 ECC
+  Storage: 4x 1.92TB NVMe
+  Network: 2x 25GbE
+  GPU: none

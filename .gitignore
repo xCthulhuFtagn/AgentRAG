@@ -1,5 +1,6 @@
 /.env
-/docs
+/docs/*
+!/docs/sample_docs/
 /data
 __pycache__/
 *.pyc

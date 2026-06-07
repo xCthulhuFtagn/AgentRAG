@@ -1,0 +1,25 @@
+Data Center Network Topology — East Region
+
+Core switches:
+- DC1-CORE-01: Cisco Nexus 9508, 100GbE line cards
+- DC1-CORE-02: Cisco Nexus 9508, 100GbE line cards (redundant pair)
+
+Rack layout for Project Alpha infrastructure:
+
+Rack A-12:
+  - SRV-7742 (Project Alpha primary)
+    Connected via: 25GbE to TOR switch ports 12-13
+    Management: 1GbE to management VLAN
+  - SRV-8850 (ML training cluster)
+    Connected via: 100GbE to TOR switch ports 44-47
+
+Rack B-07:
+  - PostgreSQL cluster nodes (PG-NODE-01, PG-NODE-02, PG-NODE-03)
+    Connected via: 25GbE each to TOR
+
+Inter-rack latency:
+  - A-12 to B-07: 0.12ms average (within same DC)
+  - A-12 to West Region DC: 4.5ms average
+
+Note: The East-West cross-region link was upgraded in September 2025,
+reducing latency from 8.2ms to 4.5ms.
