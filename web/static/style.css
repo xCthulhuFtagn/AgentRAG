@@ -1,8 +1,19 @@
 /* Agentic RAG web UI — green theme + frozen-chat animation */
 
+/* Whole app is green-toned so the blue freeze stands out strongly. */
+body {
+  background: #ecfdf5;             /* emerald-50 — overall green wash */
+}
+.app-sidebar {
+  background: #d1fae5;             /* emerald-100 — projects/files column */
+}
+.chat-panel {
+  background: #f0fdf4;             /* green-50 card */
+  border-color: #6ee7b7;          /* emerald-300 */
+}
 .project-card {
-  background: #f0fdf4;            /* green-50 */
-  border: 1px solid #bbf7d0;     /* green-200 */
+  background: #ffffff;            /* white card pops on the green sidebar */
+  border: 1px solid #86efac;     /* green-300 */
   border-radius: 10px;
   transition: box-shadow 0.15s, border-color 0.15s;
 }

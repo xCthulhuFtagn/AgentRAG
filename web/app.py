@@ -52,46 +52,46 @@ def index():
 
     # ── refreshable views ──
 
+    def _project_card(p):
+        pid = p["id"]
+        frozen = runtime.is_frozen(pid)
+        active = pid == ctx["open_pid"]
+        card_cls = "project-card w-full p-2" + (" active" if active else "")
+        with ui.card().classes(card_cls):
+            with ui.row().classes("w-full items-center no-wrap"):
+                ui.label(p["name"]).classes("font-medium grow cursor-pointer").on(
+                    "click", lambda _=None, x=pid: open_project(x)
+                )
+                with ui.button(icon="more_vert").props("flat dense round"):
+                    with ui.menu():
+                        ui.menu_item("Open", lambda x=pid: open_project(x))
+                        ui.menu_item(
+                            "Rename",
+                            lambda x=pid, n=p["name"]: rename_project_dialog(x, n),
+                        )
+                        ui.menu_item("Delete", lambda x=pid: delete_project_dialog(x))
+            btn = (
+                ui.button("Open in chat", on_click=lambda _=None, x=pid: open_in_chat(x))
+                .props("flat dense")
+                .classes("w-full")
+            )
+            if frozen:
+                # Still openable so you can watch the frozen chat; just visually
+                # marked. Sending is blocked inside the chat.
+                btn.classes("frozen")
+                ui.label("Reindexing…").classes("text-xs text-blue-600")
+
     @ui.refreshable
     def projects_list():
         projects = STORE.list_projects()
         if not projects:
             ui.label("No projects yet").classes("text-gray-400 text-sm")
             return
-        for p in projects:
-            pid = p["id"]
-            frozen = runtime.is_frozen(pid)
-            active = pid == ctx["open_pid"]
-            card_cls = "project-card w-full p-2" + (" active" if active else "")
-            with ui.card().classes(card_cls):
-                with ui.row().classes("w-full items-center no-wrap"):
-                    (
-                        ui.label(p["name"])
-                        .classes("font-medium grow cursor-pointer")
-                        .on("click", lambda _=None, x=pid: open_project(x))
-                    )
-                    with ui.button(icon="more_vert").props("flat dense round"):
-                        with ui.menu():
-                            ui.menu_item("Open", lambda x=pid: open_project(x))
-                            ui.menu_item(
-                                "Rename",
-                                lambda x=pid, n=p["name"]: rename_project_dialog(x, n),
-                            )
-                            ui.menu_item(
-                                "Delete", lambda x=pid: delete_project_dialog(x)
-                            )
-                btn = (
-                    ui.button(
-                        "Open in chat", on_click=lambda _=None, x=pid: open_in_chat(x)
-                    )
-                    .props("flat dense")
-                    .classes("w-full")
-                )
-                if frozen:
-                    # Still openable so you can watch the frozen chat; just
-                    # visually marked. Sending is blocked inside the chat.
-                    btn.classes("frozen")
-                    ui.label("Reindexing…").classes("text-xs text-blue-600")
+        # Scrollable — show ~2.5 projects so the files panel stays reachable.
+        with ui.scroll_area().classes("w-full").style("height: 230px"):
+            with ui.column().classes("w-full gap-2"):
+                for p in projects:
+                    _project_card(p)
 
     @ui.refreshable
     def files_panel():
@@ -103,17 +103,21 @@ def index():
             return
         frozen = runtime.is_frozen(pid)
         editing = bool(ctx["edit"]) and ctx["edit"]["pid"] == pid
-        ui.label(f"Files — {meta['name']}").classes("font-bold text-green-700")
+        ui.label(f"Files — {meta['name']}").classes("font-bold text-green-800")
 
         if not editing:
-            # ── View mode: read-only list + "Edit files" ──
+            # ── View mode: scrollable list (~4 files) + always-visible Edit ──
             files = STORE.list_files(pid)
-            if not files:
-                ui.label("No files uploaded").classes("text-gray-400 text-sm")
-            for f in files:
-                with ui.row().classes("w-full items-center no-wrap"):
-                    ui.icon("description").classes("text-green-600")
-                    ui.label(f"{f['name']}  ({f['size']} B)").classes("grow text-sm")
+            with ui.scroll_area().classes("w-full").style("height: 150px"):
+                with ui.column().classes("w-full gap-1"):
+                    if not files:
+                        ui.label("No files uploaded").classes("text-gray-400 text-sm")
+                    for f in files:
+                        with ui.row().classes("w-full items-center no-wrap"):
+                            ui.icon("description").classes("text-green-600")
+                            ui.label(f"{f['name']}  ({f['size']} B)").classes(
+                                "grow text-sm"
+                            )
             edit_btn = ui.button(
                 "Edit files", icon="edit", on_click=lambda _=None, x=pid: enter_edit(x)
             ).props("flat dense").classes("w-full")
@@ -121,8 +125,8 @@ def index():
                 edit_btn.props("disable")
             return
 
-        # ── Edit mode: staged changes, applied to disk only on "Done" ──
-        ui.label("Editing — changes apply on Done").classes("text-xs text-blue-600")
+        # ── Edit mode: upload + scrollable staged list + always-visible actions ──
+        ui.label("Editing — changes apply on Done").classes("text-xs text-blue-700")
         ui.upload(
             on_upload=lambda e: stage_upload(e),
             auto_upload=True,
@@ -130,19 +134,23 @@ def index():
         ).props(f'accept="{ACCEPT}"').classes("w-full")
 
         visible = [s for s in ctx["edit"]["files"] if not s["deleted"]]
-        if not visible:
-            ui.label("No files").classes("text-gray-400 text-sm")
-        for s in visible:
-            tag = " (new)" if s["origin"] == "new" else ""
-            with ui.row().classes("w-full items-center no-wrap"):
-                ui.icon("description").classes("text-green-600")
-                ui.label(f"{s['name']}{tag}").classes("grow text-sm")
-                ui.button(
-                    icon="edit", on_click=lambda _=None, x=s: stage_rename_dialog(x)
-                ).props("flat dense round")
-                ui.button(
-                    icon="delete", on_click=lambda _=None, x=s: stage_delete(x)
-                ).props("flat dense round color=red")
+        with ui.scroll_area().classes("w-full").style("height: 150px"):
+            with ui.column().classes("w-full gap-1"):
+                if not visible:
+                    ui.label("No files").classes("text-gray-400 text-sm")
+                for s in visible:
+                    tag = " (new)" if s["origin"] == "new" else ""
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        ui.icon("description").classes("text-green-600")
+                        ui.label(f"{s['name']}{tag}").classes("grow text-sm")
+                        ui.button(
+                            icon="edit",
+                            on_click=lambda _=None, x=s: stage_rename_dialog(x),
+                        ).props("flat dense round")
+                        ui.button(
+                            icon="delete",
+                            on_click=lambda _=None, x=s: stage_delete(x),
+                        ).props("flat dense round color=red")
 
         with ui.row().classes("w-full no-wrap gap-2"):
             ui.button("Cancel", on_click=lambda _=None: cancel_edit()).props("flat")
@@ -160,7 +168,7 @@ def index():
     def chat_panel():
         pid = ctx["chat_pid"]
         frozen = bool(pid) and runtime.is_frozen(pid)
-        base = "w-full h-full flex flex-col gap-2 p-3 rounded-lg border"
+        base = "chat-panel w-full h-full flex flex-col gap-2 p-3 rounded-lg border"
         with ui.column().classes(base + (" frozen" if frozen else "")):
             if frozen:
                 ui.html(_snowflakes_html()).classes("snowflakes")
@@ -421,10 +429,8 @@ def index():
     # ── layout ──
 
     with ui.row().classes("w-full h-screen no-wrap gap-0"):
-        with ui.column().classes("w-1/3 h-full p-3 gap-2 overflow-auto").style(
-            "background:#fafafa"
-        ):
-            ui.label("Projects").classes("text-xl font-bold text-green-700")
+        with ui.column().classes("app-sidebar w-1/3 h-full p-3 gap-2 overflow-auto"):
+            ui.label("Projects").classes("text-xl font-bold text-green-800")
             ui.button("＋ New project", on_click=new_project).props("color=primary")
             projects_list()
             ui.separator()
