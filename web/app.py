@@ -61,11 +61,13 @@ def index():
         frozen = runtime.is_frozen(pid)
         active = pid == ctx["open_pid"]
         card_cls = "project-card w-full p-2" + (" active" if active else "")
+        # Name: green (button green) on white cards, white on the selected card.
+        name_color = "text-white" if active else "text-green-600"
         with ui.card().classes(card_cls):
             with ui.row().classes("w-full items-center no-wrap"):
-                ui.label(p["name"]).classes("font-medium grow cursor-pointer").on(
-                    "click", lambda _=None, x=pid: open_project(x)
-                )
+                ui.label(p["name"]).classes(
+                    f"font-medium grow cursor-pointer {name_color}"
+                ).on("click", lambda _=None, x=pid: open_project(x))
                 with ui.button(icon="more_vert").props("flat dense round"):
                     with ui.menu():
                         ui.menu_item("Open", lambda x=pid: open_project(x))
@@ -79,15 +81,16 @@ def index():
                 .props("dense")
                 .classes("w-full")
             )
+            # Color via Quasar props (reliably beats Quasar's own bg-primary):
+            # idle = green button / white text; selected = white button / green text.
             if frozen:
-                # Still openable so you can watch the frozen chat; just visually
-                # marked. Sending is blocked inside the chat.
-                btn.classes("frozen")
+                # Openable so you can watch the frozen chat; marked, not usable.
+                btn.props("flat").classes("frozen")
                 ui.label("Reindexing…").classes("text-xs text-blue-600")
+            elif active:
+                btn.props("color=white text-color=primary")
             else:
-                # Invert the button vs the card: white card → green button,
-                # green (selected) card → white button.
-                btn.classes("open-chat-active" if active else "open-chat-idle")
+                btn.props("color=primary")
 
     @ui.refreshable
     def projects_list():
@@ -95,6 +98,10 @@ def index():
         if not projects:
             ui.label("No projects yet").classes("text-gray-400 text-sm")
             return
+        # Selected project floats to the top — so clicking it (which resets the
+        # scroll on refresh) lands on it instead of jumping away.
+        active_pid = ctx["open_pid"]
+        projects.sort(key=lambda p: p["id"] != active_pid)
         # Scrollable — show ~2.5 projects so the files panel stays reachable.
         with ui.scroll_area().classes("w-full").style("height: 230px"):
             with ui.column().classes("w-full gap-2"):
@@ -184,7 +191,9 @@ def index():
             if frozen:
                 ui.html(_snowflakes_html()).classes("snowflakes")
             if not pid:
-                ui.label("Open a project in chat to start").classes("text-gray-400")
+                ui.label("Open a project in chat to start").classes(
+                    "text-gray-500 text-lg m-auto"
+                )
                 return
             meta = STORE.get(pid)
             ui.label(f"Chat — {meta['name'] if meta else pid}").classes(

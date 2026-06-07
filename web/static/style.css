@@ -35,15 +35,8 @@ body,
   color: #ffffff;
 }
 
-/* "Open in chat" inverts with selection so it's readable on either card. */
-.open-chat-idle {                /* white card → dark green button, white text */
-  background: #16a34a !important;
-  color: #ffffff !important;
-}
-.open-chat-active {              /* dark green card → white button, green text */
-  background: #ffffff !important;
-  color: #15803d !important;        /* green-700 text */
-}
+/* "Open in chat" button colors come from Quasar props (color/text-color),
+   which reliably beat Quasar's own bg-primary — no CSS override needed here. */
 
 /* Frozen state: chat panel and the "Open in chat" button turn blue and tremble */
 .frozen {
@@ -84,14 +77,19 @@ body,
   100% { top: 105%;  opacity: 0;   transform: translateX(18px); }
 }
 
+/* Chat text — bumped up for readability. */
+.chat-panel {
+  font-size: 1rem;
+}
+
 /* Agent trace step chips */
 .trace-step {
   font-family: ui-monospace, monospace;
-  font-size: 0.8rem;
+  font-size: 0.9rem;
   color: #1e3a8a;                /* blue-900 */
   background: #eff6ff;           /* blue-50 */
   border-left: 3px solid #3b82f6;
-  padding: 2px 8px;
+  padding: 3px 9px;
   margin: 2px 0;
   border-radius: 4px;
 }
@@ -100,7 +98,8 @@ body,
   background: #16a34a;           /* green-600 */
   color: white;
   border-radius: 12px 12px 2px 12px;
-  padding: 8px 12px;
+  padding: 9px 13px;
+  font-size: 1rem;
   align-self: flex-end;
   max-width: 80%;
 }
@@ -108,7 +107,9 @@ body,
   background: #f1f5f9;           /* slate-100 */
   color: #0f172a;
   border-radius: 12px 12px 12px 2px;
-  padding: 8px 12px;
+  padding: 9px 13px;
+  font-size: 1rem;
+  line-height: 1.5;
   align-self: flex-start;
   max-width: 90%;
 }
