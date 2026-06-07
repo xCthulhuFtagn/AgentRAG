@@ -76,7 +76,7 @@ def index():
                         ui.menu_item("Delete", lambda x=pid: delete_project_dialog(x))
             btn = (
                 ui.button("Open in chat", on_click=lambda _=None, x=pid: open_in_chat(x))
-                .props("flat dense")
+                .props("dense")
                 .classes("w-full")
             )
             if frozen:
@@ -84,6 +84,10 @@ def index():
                 # marked. Sending is blocked inside the chat.
                 btn.classes("frozen")
                 ui.label("Reindexing…").classes("text-xs text-blue-600")
+            else:
+                # Invert the button vs the card: white card → green button,
+                # green (selected) card → white button.
+                btn.classes("open-chat-active" if active else "open-chat-idle")
 
     @ui.refreshable
     def projects_list():
@@ -442,7 +446,7 @@ def index():
             projects_list()
             ui.separator()
             files_panel()
-        with ui.column().classes("w-2/3 h-full p-3 items-center"):
+        with ui.column().classes("app-sidebar w-2/3 h-full p-3 items-center"):
             chat_panel()
 
     # Keep freeze visuals in sync with background reindexing, regardless of

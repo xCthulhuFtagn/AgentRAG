@@ -12,8 +12,8 @@ body,
   background: #d1fae5;             /* emerald-100 — projects/files column */
 }
 .chat-panel {
-  background: #d7f5e3;             /* clearly green (not white) idle chat */
-  border-color: #34d399;          /* emerald-400 */
+  background: #ffffff;            /* white chat on the green page background */
+  border-color: #34d399;         /* emerald-400 */
 }
 .project-card {
   background: #ffffff;            /* white card pops on the green sidebar */
@@ -26,8 +26,23 @@ body,
   box-shadow: 0 2px 8px rgba(22, 163, 74, 0.18);
 }
 .project-card.active {
-  border-color: #15803d;         /* green-700 */
-  background: #6ee7b7;           /* emerald-300 — clearly darker when selected */
+  border-color: #14532d;         /* green-900 */
+  background: #16a34a;           /* green-600 — dark green when selected */
+  color: #ffffff;                /* name label inherits white */
+}
+/* Selected (dark green) card: menu icon stays light too. */
+.project-card.active .q-btn {
+  color: #ffffff;
+}
+
+/* "Open in chat" inverts with selection so it's readable on either card. */
+.open-chat-idle {                /* white card → dark green button, white text */
+  background: #16a34a !important;
+  color: #ffffff !important;
+}
+.open-chat-active {              /* dark green card → white button, green text */
+  background: #ffffff !important;
+  color: #15803d !important;        /* green-700 text */
 }
 
 /* Frozen state: chat panel and the "Open in chat" button turn blue and tremble */
