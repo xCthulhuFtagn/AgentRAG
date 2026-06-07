@@ -45,7 +45,9 @@ def index():
     ui.add_css(CSS)
 
     # Per-client UI state.
-    ctx = {"open_pid": None, "chat_pid": None, "messages": []}
+    # ctx["edit"]: None, or {"pid": str, "files": [staged-entry, ...]} while editing files.
+    # A staged entry: {name, origin: "disk"|"new", orig_name, content: bytes|None, deleted: bool}.
+    ctx = {"open_pid": None, "chat_pid": None, "messages": [], "edit": None}
 
     # ── refreshable views ──
 
@@ -98,37 +100,54 @@ def index():
         if not meta:
             return
         frozen = runtime.is_frozen(pid)
+        editing = bool(ctx["edit"]) and ctx["edit"]["pid"] == pid
         ui.label(f"Files — {meta['name']}").classes("font-bold text-green-700")
-        up = (
-            ui.upload(
-                on_upload=lambda e, x=pid: handle_upload(x, e),
-                auto_upload=True,
-                multiple=True,
-            )
-            .props(f'accept="{ACCEPT}"')
-            .classes("w-full")
-        )
-        if frozen:
-            up.disable()
-        files = STORE.list_files(pid)
-        if not files:
-            ui.label("No files uploaded").classes("text-gray-400 text-sm")
+
+        if not editing:
+            # ── View mode: read-only list + "Edit files" ──
+            files = STORE.list_files(pid)
+            if not files:
+                ui.label("No files uploaded").classes("text-gray-400 text-sm")
+            for f in files:
+                with ui.row().classes("w-full items-center no-wrap"):
+                    ui.icon("description").classes("text-green-600")
+                    ui.label(f"{f['name']}  ({f['size']} B)").classes("grow text-sm")
+            edit_btn = ui.button(
+                "Edit files", icon="edit", on_click=lambda _=None, x=pid: enter_edit(x)
+            ).props("flat dense").classes("w-full")
+            if frozen:
+                edit_btn.props("disable")
             return
-        for f in files:
+
+        # ── Edit mode: staged changes, applied to disk only on "Done" ──
+        ui.label("Editing — changes apply on Done").classes("text-xs text-blue-600")
+        ui.upload(
+            on_upload=lambda e: stage_upload(e),
+            auto_upload=True,
+            multiple=True,
+        ).props(f'accept="{ACCEPT}"').classes("w-full")
+
+        visible = [s for s in ctx["edit"]["files"] if not s["deleted"]]
+        if not visible:
+            ui.label("No files").classes("text-gray-400 text-sm")
+        for s in visible:
+            tag = " (new)" if s["origin"] == "new" else ""
             with ui.row().classes("w-full items-center no-wrap"):
                 ui.icon("description").classes("text-green-600")
-                ui.label(f"{f['name']}  ({f['size']} B)").classes("grow text-sm")
-                rn = ui.button(
-                    icon="edit",
-                    on_click=lambda _=None, x=pid, n=f["name"]: rename_file_dialog(x, n),
+                ui.label(f"{s['name']}{tag}").classes("grow text-sm")
+                ui.button(
+                    icon="edit", on_click=lambda _=None, x=s: stage_rename_dialog(x)
                 ).props("flat dense round")
-                dl = ui.button(
-                    icon="delete",
-                    on_click=lambda _=None, x=pid, n=f["name"]: delete_file_action(x, n),
+                ui.button(
+                    icon="delete", on_click=lambda _=None, x=s: stage_delete(x)
                 ).props("flat dense round color=red")
-                if frozen:
-                    rn.disable()
-                    dl.disable()
+
+        with ui.row().classes("w-full no-wrap gap-2"):
+            ui.button("Cancel", on_click=lambda _=None: cancel_edit()).props("flat")
+            ui.button(
+                "Done & reindex", icon="check",
+                on_click=lambda _=None: commit_edit(),
+            ).props("color=primary").classes("grow")
 
     @ui.refreshable
     def messages_view():
@@ -192,6 +211,9 @@ def index():
     # ── actions ──
 
     def open_project(pid):
+        # Switching to a different project discards an in-progress edit session.
+        if ctx["edit"] and ctx["edit"]["pid"] != pid:
+            ctx["edit"] = None
         ctx["open_pid"] = pid
         projects_list.refresh()
         files_panel.refresh()
@@ -244,6 +266,8 @@ def index():
                 ).props("color=red")
         if await dialog:
             STORE.delete(pid)
+            if ctx["edit"] and ctx["edit"]["pid"] == pid:
+                ctx["edit"] = None
             if ctx["open_pid"] == pid:
                 ctx["open_pid"] = None
             if ctx["chat_pid"] == pid:
@@ -277,42 +301,100 @@ def index():
                 ).props("color=primary")
         return bool(await dialog)
 
-    async def handle_upload(pid, e: events.UploadEventArguments):
-        # NiceGUI 3.x: e.file is a FileUpload; .name + async .read().
-        name = e.file.name
-        # Same-name upload → ask before overwriting; "no" = don't save.
-        if STORE.file_exists(pid, name):
+    # ── Edit-mode file staging (disk + reindex happen only on "Done") ──
+
+    def enter_edit(pid):
+        # Snapshot the current on-disk files as the starting staged set.
+        staged = [
+            {"name": f["name"], "origin": "disk", "orig_name": f["name"],
+             "content": None, "deleted": False}
+            for f in STORE.list_files(pid)
+        ]
+        ctx["edit"] = {"pid": pid, "files": staged}
+        files_panel.refresh()
+
+    def cancel_edit():
+        # Discard all staged changes — disk untouched.
+        ctx["edit"] = None
+        files_panel.refresh()
+
+    def _visible_names() -> set[str]:
+        return {s["name"] for s in ctx["edit"]["files"] if not s["deleted"]}
+
+    async def stage_upload(e: events.UploadEventArguments):
+        name = Path(e.file.name).name
+        if Path(name).suffix.lower() not in SUPPORTED_SUFFIXES:
+            ui.notify(f"Unsupported file type: {name}", color="negative")
+            return
+        # Same-name within the staged set → ask before replacing.
+        clash = next(
+            (s for s in ctx["edit"]["files"] if not s["deleted"] and s["name"] == name),
+            None,
+        )
+        if clash is not None:
             if not await confirm_replace(name):
                 ui.notify(f"Kept existing {name}", color="warning")
                 return
-        try:
-            content = await e.file.read()
-            STORE.add_file(pid, name, content)
-        except ValueError as ex:
-            ui.notify(str(ex), color="negative")
-            return
-        await trigger_reindex(pid)
-        ui.notify(f"Indexed {name}", color="positive")
+            clash["deleted"] = True
+        content = await e.file.read()
+        ctx["edit"]["files"].append(
+            {"name": name, "origin": "new", "orig_name": None,
+             "content": content, "deleted": False}
+        )
+        files_panel.refresh()
 
-    async def rename_file_dialog(pid, old):
+    async def stage_rename_dialog(entry):
         with ui.dialog() as dialog, ui.card():
             ui.label("Rename file").classes("font-bold")
-            name = ui.input("New filename", value=old).props("autofocus")
+            inp = ui.input("New filename", value=entry["name"]).props("autofocus")
             with ui.row():
                 ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
-                ui.button("Save", on_click=lambda: dialog.submit(name.value))
+                ui.button("Save", on_click=lambda: dialog.submit(inp.value))
         result = await dialog
-        if result and result != old:
-            try:
-                STORE.rename_file(pid, old, result)
-            except (ValueError, OSError) as ex:
-                ui.notify(str(ex), color="negative")
-                return
-            await trigger_reindex(pid)
+        if not result:
+            return
+        new_name = Path(result).name
+        if new_name == entry["name"]:
+            return
+        if Path(new_name).suffix.lower() not in SUPPORTED_SUFFIXES:
+            ui.notify(f"Unsupported file type: {new_name}", color="negative")
+            return
+        if new_name in _visible_names():
+            ui.notify(f"A file named '{new_name}' already exists", color="negative")
+            return
+        entry["name"] = new_name
+        files_panel.refresh()
 
-    async def delete_file_action(pid, name):
-        STORE.delete_file(pid, name)
+    def stage_delete(entry):
+        if entry["origin"] == "new":
+            ctx["edit"]["files"].remove(entry)  # nothing on disk yet
+        else:
+            entry["deleted"] = True             # tombstone — removed on commit
+        files_panel.refresh()
+
+    async def commit_edit():
+        pid = ctx["edit"]["pid"]
+        # Build the final {name: bytes} set from the staged entries.
+        final: dict[str, bytes] = {}
+        for s in ctx["edit"]["files"]:
+            if s["deleted"]:
+                continue
+            name = s["name"]
+            if name in final:
+                ui.notify(f"Duplicate filename: {name}", color="negative")
+                return
+            final[name] = (
+                s["content"] if s["origin"] == "new"
+                else STORE.read_file(pid, s["orig_name"])
+            )
+        try:
+            STORE.replace_all_files(pid, final)
+        except (ValueError, OSError) as ex:
+            ui.notify(str(ex), color="negative")
+            return
+        ctx["edit"] = None
         await trigger_reindex(pid)
+        ui.notify("Files updated", color="positive")
 
     async def send_message(inp):
         pid = ctx["chat_pid"]

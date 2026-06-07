@@ -133,3 +133,25 @@ class ProjectStore:
     def delete_file(self, pid: str, name: str) -> None:
         target = self.files_dir(pid) / Path(name).name
         target.unlink(missing_ok=True)
+
+    def read_file(self, pid: str, name: str) -> bytes:
+        """Read an existing uploaded file's bytes."""
+        return (self.files_dir(pid) / Path(name).name).read_bytes()
+
+    def replace_all_files(self, pid: str, files: dict[str, bytes]) -> None:
+        """Atomically replace the project's file set with `files` (name → bytes).
+
+        Used to commit a batch of staged edits (add/rename/delete) in one shot:
+        wipe the files dir, then write each entry. Validates suffixes first so a
+        bad name aborts before anything is deleted.
+        """
+        for name in files:
+            if Path(name).suffix.lower() not in SUPPORTED_SUFFIXES:
+                raise ValueError(f"Unsupported file type: {name}")
+        fdir = self.files_dir(pid)
+        fdir.mkdir(parents=True, exist_ok=True)
+        for f in fdir.iterdir():
+            if f.is_file():
+                f.unlink()
+        for name, content in files.items():
+            (fdir / Path(name).name).write_bytes(content)

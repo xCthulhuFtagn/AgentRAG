@@ -79,8 +79,8 @@ python -m src.main --query "What CPU and RAM does the server for Project Alpha h
 A Python-only UI: **projects on the left, chat on the right**.
 
 - Create / rename / delete / open projects (green theme).
-- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`) — add / rename / delete.
-- Any file change **reindexes** the project's vector DB; the chat **freezes** (turns blue and trembles) until reindexing finishes. "Open in chat" is disabled for a reindexing project.
+- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & reindex** applies everything at once (one reindex); **Cancel** discards.
+- That single reindex **freezes** the chat (turns blue, trembles, snows ❄) until it finishes. "Open in chat" is disabled for a reindexing project.
 - Chat streams the **live agent trace** (orchestrator → planner → search → sufficient) then the final answer.
 - Projects are **isolated** — each has its own LanceDB, so search never leaks across projects.
 
