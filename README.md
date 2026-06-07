@@ -18,20 +18,25 @@ orchestrator ◀── entry_point
       planner → Command(goto="query_rewriter")
         │
         ▼
-      query_rewriter ◄──────────────────┐
-        │ Command(goto="search_fanout")  │
-        ▼                                │
-      search_fanout                      │
-        │ Command(goto="sufficient")      │
-        ▼                                │
-      sufficient_context ────────────────┘
-        │ insufficient: Command(goto="query_rewriter")
-        │ sufficient: Command(goto="synthesis")
-        ▼
-      synthesis → Command(goto=END)
+      query_rewriter ◄──────────────────────────┐
+        │ Command(goto="search_fanout")          │
+        ▼                                        │
+      search_fanout                              │
+        │ Command(goto="sufficient_context")     │
+        ▼                                        │
+      sufficient_context ────────────────────────┘
+        │
+        ├─ insufficient + iters left:
+        │    Command(goto="query_rewriter")
+        │
+        ├─ sufficient:
+        │    Command(goto="synthesis") → END
+        │
+        └─ insufficient + max iters:
+             Command(goto="give_up") → END
 ```
 
-### 6 agents
+### 7 agents
 
 | Agent | Role |
 |-------|------|
@@ -41,6 +46,7 @@ orchestrator ◀── entry_point
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
 | **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step |
 | **Synthesis** | Generates final answer with source citations |
+| **Give Up** | System-generated refusal when context is exhausted; no LLM call |
 
 ### Stack
 
@@ -72,13 +78,14 @@ python -m src.main --query "What is the capital of France?"
 
 ```
 src/
-├── agents/               # 6 agents + common LLM factory
+├── agents/               # 7 agents + common LLM factory
 │   ├── orchestrator.py   #   Command(goto="synthesis" | "planner")
 │   ├── planner.py        #   Command(goto="query_rewriter")
 │   ├── query_rewriter.py #   Command(goto="search_fanout")
 │   ├── search_fanout.py  #   Command(goto="sufficient_context")
-│   ├── sufficient_context.py  # Command(goto="synthesis" | "query_rewriter")
-│   └── synthesis.py      #   Command(goto=END)
+│   ├── sufficient_context.py  # Command(goto="synthesis" | "query_rewriter" | "give_up")
+│   ├── synthesis.py      #   Command(goto=END)
+│   └── give_up.py        #   Command(goto=END) — system refusal, no LLM
 ├── vectordb/             # Vector DB module
 │   ├── embeddings.py     #   FastEmbed wrapper
 │   ├── client.py         #   LanceDB connection
@@ -96,10 +103,11 @@ src/
    - **Retrieved snippets** — do they contain the needed facts?
    - **Draft answer** — can we construct a complete answer?
    - **Missing pieces** — *what exactly* is missing and *where* to find it
-2. If insufficient → returns `Command(goto="query_rewriter")` with `feedback="search for X in Y"`
+2. If insufficient + iterations left → returns `Command(goto="query_rewriter")` with `feedback="search for X in Y"`
 3. Query Rewriter sees feedback → generates a targeted query for the missing piece
 4. Search Fanout searches again → Sufficient Context checks again
-5. Max 3 iterations; on the last one, context is forced sufficient
+5. If max iterations reached and still insufficient → `Command(goto="give_up")`
+6. Give Up node builds an honest refusal: what was found, what's missing, why
 
 ## Configuration
 

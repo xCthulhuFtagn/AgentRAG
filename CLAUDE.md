@@ -7,7 +7,7 @@ Agentic RAG — multi-agent retrieval pipeline on LangGraph + DeepSeek + LanceDB
 **Fully edgeless LangGraph graph.** All routing via `Command(goto=...)` returned from nodes. No `add_edge`, no `add_conditional_edges`, no `Send`.
 
 Entry: `set_entry_point("orchestrator")`
-Exit: `Command(goto=END)` in synthesis node.
+Exit: `Command(goto=END)` in synthesis or give_up nodes.
 
 ## Graph flow
 
@@ -17,10 +17,24 @@ orchestrator ──simple──► synthesis ──► END
      ▼
   planner → query_rewriter → search_fanout → sufficient_context
                 ▲                                  │
-                │    insufficient (feedback loop)   │
+                │    insufficient + iters left      │
                 └──────────────────────────────────┘
-                         sufficient → synthesis → END
+                                                   │
+                         sufficient ──► synthesis ──► END
+                         insufficient + max iters ──► give_up ──► END
 ```
+
+## Nodes (7 total)
+
+| # | Node | Returns |
+|---|------|---------|
+| 1 | orchestrator | `Command(goto="synthesis" \| "planner")` |
+| 2 | planner | `Command(goto="query_rewriter" \| "synthesis")` |
+| 3 | query_rewriter | `Command(goto="search_fanout")` |
+| 4 | search_fanout | `Command(goto="sufficient_context")` |
+| 5 | sufficient_context | `Command(goto="synthesis" \| "query_rewriter" \| "give_up")` |
+| 6 | synthesis | `Command(goto=END)` |
+| 7 | give_up | `Command(goto=END)` — system refusal, no LLM |
 
 ## Key design decisions
 
@@ -29,6 +43,7 @@ orchestrator ──simple──► synthesis ──► END
 - **TypedDict state** — not Pydantic BaseModel; uses `Annotated[list, operator.add]` reducers so `search_results`/`trace`/`rewritten_queries` accumulate across iterations
 - **All async** — nodes are `async def`, tools are `async def`, streaming via `graph.astream()`
 - **Only vector search tools** — `vector_search` and `list_collections` via LanceDB; no web/Wikipedia APIs
+- **Honest refusal** — Give Up node builds a system-generated message (no LLM) listing what was found, what's missing, and why
 
 ## State accumulation
 
@@ -50,9 +65,10 @@ OpenAI-compatible endpoint at `https://api.deepseek.com/v1`. Model: `deepseek-ch
 
 Sufficient Context Agent returns:
 - Sufficient → `Command(goto="synthesis")`
-- Insufficient → `Command(goto="query_rewriter")` with `feedback`, `missing_parts`
+- Insufficient + iters left → `Command(goto="query_rewriter")` with `feedback`, `missing_parts`
+- Insufficient + max iters → `Command(goto="give_up")` (system refusal, no LLM)
 
-Query Rewriter checks `state["feedback"]` — if set, generates targeted query for missing piece instead of rewriting all routes. Max iterations: 3 (forced sufficient on last).
+Query Rewriter checks `state["feedback"]` — if set, generates targeted query for missing piece instead of rewriting all routes. Max iterations: 3.
 
 ## Running
 
