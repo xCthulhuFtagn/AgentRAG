@@ -12,10 +12,15 @@ from pydantic import BaseModel, Field
 # ── Structured output schemas (Pydantic — used by LLM.with_structured_output) ──
 
 class RouteStep(BaseModel):
-    """A single search route from Planner."""
-    collection: str = Field(description="LanceDB collection/table name to search")
-    subquery: str = Field(description="What to search for in this collection")
-    rationale: str = Field(description="Why this collection is relevant")
+    """A single search route from the Planner.
+
+    Schema-Guided Reasoning: the rationale (why this source) is generated BEFORE
+    the collection/subquery it justifies, so the choice follows the reasoning
+    instead of being rationalized after the fact.
+    """
+    rationale: str = Field(description="Decide FIRST: why this collection is the right place to look for the needed piece.")
+    collection: str = Field(description="The collection/table name to search (must match an available collection), chosen per the rationale.")
+    subquery: str = Field(description="The focused thing to search for in that collection.")
 
 
 class PlanResult(BaseModel):
@@ -25,9 +30,14 @@ class PlanResult(BaseModel):
 
 
 class OrchestratorResult(BaseModel):
-    """Orchestrator output: complexity assessment."""
-    is_complex: bool = Field(description="Whether the query needs multi-agent decomposition")
-    reasoning: str = Field(description="Brief explanation of the decision")
+    """Orchestrator output: complexity assessment.
+
+    Schema-Guided Reasoning: the reasoning is generated BEFORE the is_complex
+    verdict, so the boolean follows the analysis instead of being decided up
+    front and rationalized afterward.
+    """
+    reasoning: str = Field(description="Analysis FIRST: does the query need multi-agent decomposition (multi-hop, multiple sources, planning) or can it be answered directly from one search?")
+    is_complex: bool = Field(description="VERDICT, after the reasoning above: True if the query needs the multi-agent pipeline, False if a direct answer suffices.")
 
 
 class SufficientContextResult(BaseModel):
