@@ -37,18 +37,18 @@ Analyze THREE things:
 
 1. **Retrieved snippets**: Read all retrieved text chunks. Do they contain the FACTS needed to answer every part of the question?
 
-2. **Draft answer**: Try to construct a draft answer. If you can fully answer the question, the context is sufficient.
+2. **Draft answer**: Try to construct a draft answer from ALL the context accumulated so far (across every iteration). If it already answers the question, the context is SUFFICIENT — stop here. Do NOT keep searching for additional or confirmatory sources once the question is answerable.
 
 3. **Missing pieces (CRITICAL)**: If anything is missing, be SPECIFIC:
    - What exact information is missing?
    - Which collection should we search in?
    - What alternative search terms should be tried?
 
-Rules:
-- If ALL parts of the question can be answered from the retrieved context → sufficient=True
-- If ANY part is missing → sufficient=False, with specific feedback (what's missing, which collection to search next)
-- A "not found / not defined / not mentioned" answer is NOT sufficient while any collection that could plausibly hold the answer has NOT been searched yet — set sufficient=False and route there
-- It's better to flag insufficient and search again than to guess
+Rules (evaluate sufficiency of the WHOLE accumulated context FIRST, before thinking about searching more):
+- If the accumulated context answers the question → sufficient=True. This holds even if some collections were never searched and might contain related material. Do NOT mark insufficient just to be thorough, to double-check/confirm an answer you already have, or because another collection "might also" hold it (or "more" of it).
+- Only when the answer is genuinely MISSING or INCOMPLETE → sufficient=False, with specific feedback (what's missing, which collection to search next)
+- A "not found / not defined / not mentioned" answer is NOT sufficient while any collection that could plausibly hold the answer has NOT been searched yet — set sufficient=False and route there. (This applies only when the answer is actually absent — not to verify an answer already present.)
+- It's better to flag insufficient and search again than to guess — but only when something is truly missing, not merely unconfirmed
 - Be consistent: if your feedback says to search more, then sufficient MUST be False
 
 How to use the inventory (it is the COMPLETE, authoritative list of every document — there are no others):
