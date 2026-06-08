@@ -99,9 +99,9 @@ Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, 
 | `CHUNK_SIZE` | `1000` | chunk target (chars); new docs only |
 | `CHUNK_OVERLAP` | `150` | chunk overlap (chars) |
 | `SEARCH_TOP_K` | `5` | nearest chunks per (collection, query) before stitching |
-| `EXPAND_PADDING` | `2` | neighbor stitching: window `[seq-P, seq+P]` per hit |
-| `BRIDGE_GAP` | `1` | merge windows when uncovered gap ≤ this |
-| `MAX_EXPANDED` | `20` | cap on stitched chunks per result |
+| `EXPAND_PADDING` | `1` | neighbor stitching: window `[seq-P, seq+P]` per hit |
+| `BRIDGE_GAP` | `2` | merge windows when uncovered gap ≤ this |
+| `MAX_EXPANDED` | `16` | cap on stitched chunks per result |
 
 All have defaults — only `DEEPSEEK_API_KEY` is required. Access values via the objects (`vdb_settings.search_top_k`), never module-level constants. Validation rejects bad values (e.g. `SEARCH_TOP_K=0` → `ge=1` error) at startup.
 

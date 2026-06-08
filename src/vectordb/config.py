@@ -46,9 +46,12 @@ class VectorDBSettings(BaseSettings):
     # windows merge when the uncovered gap between them is <= bridge_gap, then
     # every chunk in the merged ranges is fetched by seq (capped at max_expanded
     # per result). Effective hit-merge distance = 2*expand_padding + bridge_gap + 1.
-    expand_padding: int = Field(default=2, ge=0)
-    bridge_gap: int = Field(default=1, ge=0)
-    max_expanded: int = Field(default=20, ge=1)
+    # Defaults tuned (P=1, gap=2 → merge distance 5) for ~25% less pulled content
+    # than P=2/gap=1 while still recovering split blocks; do NOT lower top_k —
+    # a block's head may be anchored by a low-ranked hit that top_k=5 still catches.
+    expand_padding: int = Field(default=1, ge=0)
+    bridge_gap: int = Field(default=2, ge=0)
+    max_expanded: int = Field(default=16, ge=1)
 
 
 vdb_settings = VectorDBSettings()
