@@ -9,7 +9,7 @@ from langgraph.graph import StateGraph, END
 from langgraph.checkpoint.memory import MemorySaver
 
 from src.state import AgentRAGState
-from src.agents.common import logged_node
+from src.agents.common import logged_node, llm_failsafe
 from src.agents.orchestrator import orchestrator_node
 from src.agents.planner import planner_node
 from src.agents.query_rewriter import query_rewriter_node
@@ -67,7 +67,11 @@ def build_graph() -> StateGraph:
     workflow = StateGraph(AgentRAGState)
 
     # logged_node wraps each node so its trace entries are emitted as logs —
-    # one choke point, identical under CLI and web.
+    # one choke point, identical under CLI and web. llm_failsafe wraps every
+    # node EXCEPT give_up so an unrecoverable model failure routes to give_up
+    # (honest refusal) instead of crashing the run; give_up uses no LLM and must
+    # not redirect to itself. Order: logged_node outside, so a node's tokens
+    # spent before failing are still metered onto the give_up redirect entry.
     nodes = {
         "orchestrator": orchestrator_node,
         "planner": planner_node,
@@ -78,7 +82,8 @@ def build_graph() -> StateGraph:
         "give_up": give_up_node,
     }
     for name, node in nodes.items():
-        workflow.add_node(name, logged_node(node))
+        guarded = node if name == "give_up" else llm_failsafe(name)(node)
+        workflow.add_node(name, logged_node(guarded))
 
     workflow.set_entry_point("orchestrator")
 

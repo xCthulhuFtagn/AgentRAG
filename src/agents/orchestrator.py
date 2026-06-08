@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, OrchestratorResult, make_trace_entry
-from src.agents.common import get_structured_llm
+from src.agents.common import generate_structured
 
 ORCHESTRATOR_PROMPT = """You are the Orchestrator (Root Agent) of an Agentic RAG system.
 
@@ -40,9 +40,9 @@ async def orchestrator_node(
 ) -> Command | dict:
     """Orchestrator: assess complexity and route accordingly."""
     prompt = ORCHESTRATOR_PROMPT.format(query=state["query"])
-    result: OrchestratorResult = await get_structured_llm(
-        OrchestratorResult
-    ).ainvoke(prompt)
+    result: OrchestratorResult = await generate_structured(
+        OrchestratorResult, prompt
+    )
 
     trace_entry = make_trace_entry(
         agent="orchestrator",

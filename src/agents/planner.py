@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, PlanResult, make_trace_entry
-from src.agents.common import get_structured_llm
+from src.agents.common import generate_structured
 from src.vectordb.config import vdb_settings
 from src.vectordb.tools import list_collections, list_collections_described
 
@@ -108,7 +108,10 @@ async def planner_node(
             query=state["query"],
             collections=collections_str,
         )
-    plan: PlanResult = await get_structured_llm(PlanResult).ainvoke(prompt)
+    # RouteStep requires a non-empty collection/subquery, so a step DeepSeek
+    # under-fills (only rationale) fails validation; generate_structured re-prompts
+    # with the error and, if the model keeps failing, routes to give_up.
+    plan: PlanResult = await generate_structured(PlanResult, prompt)
 
     steps_dicts = [s.model_dump() for s in plan.steps]
 

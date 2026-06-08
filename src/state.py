@@ -7,10 +7,15 @@ import json
 import operator
 from typing import Annotated, Any, Optional, TypedDict
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ── Structured output schemas (Pydantic — used by LLM.with_structured_output) ──
+#
+# Every constraint a structured result must satisfy is expressed as Pydantic
+# validation: a violation raises ValidationError, which generate_structured()
+# turns into a clarification re-prompt and, if the model keeps failing, an honest
+# give_up. There is one uniform mechanism — no separate per-schema retry path.
 
 def _coerce_list(v):
     """Coerce a list field that arrived as a JSON-encoded string back to a list.
@@ -37,10 +42,26 @@ class RouteStep(BaseModel):
     Schema-Guided Reasoning: the rationale (why this source) is generated BEFORE
     the collection/subquery it justifies, so the choice follows the reasoning
     instead of being rationalized after the fact.
+
+    All three fields are strictly required and non-empty: a step DeepSeek emits
+    with a missing or blank collection/subquery (e.g. only 'rationale') is not a
+    usable route, so it raises ValidationError. generate_structured then re-prompts
+    with the error and, if the model keeps failing, routes to give_up — the same
+    strict path used for the scalar verdicts, rather than silently dropping steps.
     """
     rationale: str = Field(description="Decide FIRST: why this collection is the right place to look for the needed piece.")
     collection: str = Field(description="The collection/table name to search (must match an available collection), chosen per the rationale.")
     subquery: str = Field(description="The focused thing to search for in that collection.")
+
+    @field_validator("collection", "subquery")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        # `required` alone accepts "" / whitespace (a valid str); reject those too
+        # so a semantically-empty route fails validation instead of searching a
+        # nonexistent "" collection.
+        if not v or not v.strip():
+            raise ValueError("must be a non-empty string")
+        return v
 
 
 class PlanResult(BaseModel):
@@ -95,6 +116,23 @@ class SufficientContextResult(BaseModel):
         description="LAST: only when sufficient is False — specific next-search instructions chosen to fill the gap (what to look for and which collection).",
     )
 
+    @model_validator(mode="after")
+    def _verdict_must_be_actionable(self):
+        # An "insufficient" verdict is only usable if it says what to do next:
+        # the Planner re-routes on `feedback`, and give_up reports `missing_parts`.
+        # If the judge said False but gave neither, reject it as a validation
+        # error — generate_structured re-prompts with this message and, if the
+        # model keeps failing, routes to give_up. Same uniform path as any other
+        # schema violation; no separate retry mechanism.
+        if not self.sufficient and not self.feedback.strip() and not self.missing_parts:
+            raise ValueError(
+                "When sufficient is false you MUST provide missing_parts (the "
+                "concrete pieces still absent) and/or feedback (which collection "
+                "to search next and with what query). Otherwise set sufficient "
+                "to true if the retrieved context actually answers the question."
+            )
+        return self
+
 
 # ── Graph State (TypedDict with Annotated reducers) ──
 
@@ -144,6 +182,10 @@ class AgentRAGState(TypedDict):
     # Final answer
     final_answer: str
 
+    # Set by llm_failsafe when a node's LLM call fails unrecoverably — give_up
+    # reads it to render an honest "model problem" refusal. "" = no LLM failure.
+    llm_error: str
+
     # Audit trail
     trace: Annotated[list[dict], operator.add]
 
@@ -176,6 +218,7 @@ def make_initial_state(
         iteration_count=0,
         max_iterations=max_iterations,
         final_answer="",
+        llm_error="",
         trace=[],
     )
 

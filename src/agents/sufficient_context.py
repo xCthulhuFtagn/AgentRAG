@@ -16,7 +16,7 @@ from langgraph.types import Command
 
 from src.config import general_settings
 from src.state import AgentRAGState, SufficientContextResult, make_trace_entry
-from src.agents.common import get_structured_llm, get_inventory_str
+from src.agents.common import generate_structured, get_inventory_str
 
 SUFFICIENT_CONTEXT_PROMPT = """You are the Sufficient Context Agent — the quality-control inspector of an Agentic RAG system.
 
@@ -101,9 +101,9 @@ async def sufficient_context_node(
         previous_gaps=", ".join(state.get("missing_parts", [])) or "(none)",
     )
 
-    result: SufficientContextResult = await get_structured_llm(
-        SufficientContextResult
-    ).ainvoke(prompt)
+    result: SufficientContextResult = await generate_structured(
+        SufficientContextResult, prompt
+    )
 
     judge_info = f"reason: {result.reason}"
     if result.feedback and result.feedback.strip():

@@ -10,9 +10,34 @@ from langchain_openai import ChatOpenAI
 from langgraph.types import Command
 
 from src.config import general_settings
+from src.state import make_trace_entry
 from src.vectordb.tools import list_collections_described
 
 log = logging.getLogger("agentrag.node")
+
+
+# ── LLM failure → honest refusal ─────────────────────────────────────────────
+# When the model can't produce a usable result (validation keeps failing, the
+# API errors out, or no tool call comes back), we route to give_up rather than
+# crash the graph — matching the system's "honest refusal" design.
+
+class StructuredGenerationError(RuntimeError):
+    """The LLM could not produce a usable structured result after all retries."""
+
+
+# Transport/API errors from the OpenAI-compatible client count as LLM failures
+# too (rate limits, 5xx, connection drops). Imported defensively so a missing
+# openai package never breaks startup.
+try:  # pragma: no cover - import guard
+    from openai import APIError as _OpenAIAPIError
+    _LLM_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (_OpenAIAPIError,)
+except Exception:  # pragma: no cover
+    _LLM_TRANSPORT_ERRORS = ()
+
+# What llm_failsafe treats as "the model failed" → give_up (not a code bug).
+LLM_FAILURE_ERRORS: tuple[type[BaseException], ...] = (
+    StructuredGenerationError,
+) + _LLM_TRANSPORT_ERRORS
 
 
 # ── Per-node token accounting ────────────────────────────────────────────────
@@ -119,6 +144,41 @@ def logged_node(fn):
     return wrapper
 
 
+def llm_failsafe(node_name: str):
+    """Wrap a node so an unrecoverable LLM failure routes to give_up, not a crash.
+
+    Catches `LLM_FAILURE_ERRORS` — StructuredGenerationError (the model couldn't
+    produce a usable structured result after retries) and OpenAI API/transport
+    errors (raised by the plain-LLM nodes). Anything else propagates: a code bug
+    must not be silently masked as "the model failed". On catch, redirects to
+    give_up with `llm_error` set so the refusal honestly cites the model problem.
+
+    NOT applied to give_up itself — it uses no LLM, and redirecting it to itself
+    would loop.
+    """
+
+    def deco(fn):
+        @functools.wraps(fn)
+        async def wrapper(state, **kwargs):
+            try:
+                return await fn(state, **kwargs)
+            except LLM_FAILURE_ERRORS as e:
+                log.warning("[%s] LLM failure → give_up: %s", node_name, e)
+                trace_entry = make_trace_entry(
+                    agent=node_name,
+                    decision="llm_failure → give_up",
+                    detail=str(e),
+                )
+                return Command(
+                    goto="give_up",
+                    update={"llm_error": str(e), "trace": [trace_entry]},
+                )
+
+        return wrapper
+
+    return deco
+
+
 @lru_cache(maxsize=4)
 def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI:
     """Get a configured DeepSeek LLM instance (cached).
@@ -145,3 +205,38 @@ def get_structured_llm(schema, temperature: float = 0.0):
     return get_llm(temperature).with_structured_output(
         schema, method="function_calling"
     )
+
+
+async def generate_structured(schema, prompt: str, *, temperature: float = 0.0):
+    """Invoke a structured LLM, retrying with clarification, else fail loudly.
+
+    Every requirement on the result is a Pydantic constraint — required fields,
+    non-empty strings, cross-field rules (model_validator). A violation raises
+    ValidationError, exactly like a transport error or a missing tool call. We
+    re-prompt with the specific deficiency up to
+    `general_settings.structured_max_retries` times; if the model still can't
+    satisfy the schema, raise StructuredGenerationError, which `llm_failsafe`
+    turns into an honest give_up refusal instead of letting the graph crash.
+    """
+    retries = general_settings.structured_max_retries
+    llm = get_structured_llm(schema, temperature)
+    current = prompt
+    for attempt in range(retries + 1):
+        last = attempt >= retries
+        try:
+            result = await llm.ainvoke(current)
+            if result is None:  # no tool call came back
+                raise ValueError("the model returned no structured output")
+            return result
+        except Exception as e:  # ValidationError, API/transport errors, no tool call
+            if last:
+                raise StructuredGenerationError(
+                    f"{schema.__name__}: the model failed to produce a valid "
+                    f"response after {retries + 1} attempt(s) — {type(e).__name__}: {e}"
+                ) from e
+            current = (
+                f"{prompt}\n\nYour previous response failed:\n{e}\n\n"
+                "Return a corrected response — call the function with every "
+                "required field present, correctly typed, and satisfying the "
+                "field rules described in the schema."
+            )

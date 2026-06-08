@@ -27,5 +27,10 @@ class GeneralSettings(BaseSettings):
     # Agent loop
     max_iterations: int = Field(default=3, ge=1)
 
+    # Structured-output generation: extra re-prompts when DeepSeek's
+    # function-calling returns a result that fails the schema's Pydantic
+    # validation (missing/blank fields, cross-field rules). 0 disables retries.
+    structured_max_retries: int = Field(default=1, ge=0)
+
 
 general_settings = GeneralSettings()

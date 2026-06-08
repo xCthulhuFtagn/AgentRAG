@@ -12,6 +12,25 @@ from src.config import general_settings
 from src.state import AgentRAGState, make_trace_entry
 
 
+def _build_llm_error_answer(state: AgentRAGState) -> str:
+    """Refusal for an unrecoverable model failure (set by llm_failsafe).
+
+    Distinct from the "insufficient context" refusal: here the retrieval pipeline
+    didn't conclude — the language model itself failed to return a valid response,
+    so the system reports that honestly instead of crashing.
+    """
+    return (
+        f"## Unable to answer — language model error\n\n"
+        f"**Question:** {state['query']}\n\n"
+        f"**What happened:** The system's language model failed to return a "
+        f"valid response after several attempts, so this request could not be "
+        f"processed.\n\n"
+        f"**Details:** {state.get('llm_error', 'unspecified model error')}\n\n"
+        f"**Recommendation:** This is usually transient (model overload or a "
+        f"temporary API error). Please try again in a moment."
+    )
+
+
 def _build_refusal_answer(state: AgentRAGState) -> str:
     """Build a system-generated refusal message.
 
@@ -72,16 +91,24 @@ async def give_up_node(
 ) -> Command:
     """Give Up: build refusal answer, command END. No LLM call."""
 
-    refusal = _build_refusal_answer(state)
-
-    trace_entry = make_trace_entry(
-        agent="give_up",
-        decision="refusal",
-        detail=(
-            f"max_iterations={state.get('max_iterations', general_settings.max_iterations)} "
-            f"reached, context insufficient"
-        ),
-    )
+    llm_error = state.get("llm_error")
+    if llm_error:
+        refusal = _build_llm_error_answer(state)
+        trace_entry = make_trace_entry(
+            agent="give_up",
+            decision="refusal (llm_error)",
+            detail=llm_error,
+        )
+    else:
+        refusal = _build_refusal_answer(state)
+        trace_entry = make_trace_entry(
+            agent="give_up",
+            decision="refusal",
+            detail=(
+                f"max_iterations={state.get('max_iterations', general_settings.max_iterations)} "
+                f"reached, context insufficient"
+            ),
+        )
 
     return Command(
         goto=END,
