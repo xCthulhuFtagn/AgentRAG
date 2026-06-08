@@ -4,6 +4,8 @@ Returns Command(goto="search_fanout") — edgeless routing.
 Processes all plan_steps at once, or handles iteration feedback.
 """
 
+import asyncio
+
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
@@ -40,6 +42,22 @@ Be more specific, use alternative keywords, try a different angle.
 Focus ONLY on what was missed.
 
 Return ONLY the rewritten search query text, nothing else."""
+
+
+async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str]:
+    """Rewrite one plan route into a search-optimized query.
+
+    Returns (collection, query). Module-level so it isn't redefined per node
+    call; routes are rewritten concurrently via asyncio.gather.
+    """
+    collection = step.get("collection", "unknown")
+    prompt = REWRITER_PROMPT.format(
+        original_query=original_query,
+        collection=collection,
+        subquery=step.get("subquery", original_query),
+    )
+    result: str = (await llm.ainvoke(prompt)).content.strip().strip('"')
+    return collection, result
 
 
 async def query_rewriter_node(
@@ -84,16 +102,14 @@ async def query_rewriter_node(
             rewritten = [state["query"]]  # fallback: use original query
             search_tasks = [{"collection": None, "query": state["query"]}]
         else:
-            for step in plan_steps:
-                collection = step.get("collection", "unknown")
-                prompt = REWRITER_PROMPT.format(
-                    original_query=state["query"],
-                    collection=collection,
-                    subquery=step.get("subquery", state["query"]),
-                )
-                result: str = (await llm.ainvoke(prompt)).content.strip().strip('"')
-                rewritten.append(result)
-                search_tasks.append({"collection": collection, "query": result})
+            # Routes are independent → rewrite them concurrently (asyncio.gather)
+            # instead of one LLM call after another. gather preserves order, so
+            # rewritten[i]/search_tasks[i] still align with plan_steps[i].
+            pairs = await asyncio.gather(
+                *[_rewrite_route(llm, state["query"], s) for s in plan_steps]
+            )
+            rewritten = [q for _, q in pairs]
+            search_tasks = [{"collection": c, "query": q} for c, q in pairs]
         mode = "initial"
 
         trace_entry = make_trace_entry(

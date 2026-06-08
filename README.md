@@ -15,10 +15,10 @@ orchestrator ◀── entry_point
   └─ Command(goto="planner")            ← complex query
         │
         ▼
-      planner → Command(goto="query_rewriter")
-        │
-        ▼
-      query_rewriter ◄──────────────────────────┐
+      planner ◄──────────────────────────────────┐
+        │ Command(goto="query_rewriter")          │
+        ▼                                        │
+      query_rewriter                             │
         │ Command(goto="search_fanout")          │
         ▼                                        │
       search_fanout                              │
@@ -27,8 +27,8 @@ orchestrator ◀── entry_point
       sufficient_context ────────────────────────┘
         │
         ├─ insufficient + iters left:
-        │    Command(goto="query_rewriter")
-        │
+        │    Command(goto="planner")  ← re-route to the collection
+        │                                holding the missing piece
         ├─ sufficient:
         │    Command(goto="synthesis") → END
         │
@@ -36,13 +36,19 @@ orchestrator ◀── entry_point
              Command(goto="give_up") → END
 ```
 
+On iteration the loop re-enters at the **Planner**, which re-routes to the
+collection(s) most likely to hold the missing piece (mirrors Google RAG
+Engine's loop that re-enters before its Search Plan agent). If the Planner
+finds no relevant route, it falls through to the Query Rewriter's broad
+fallback — a single targeted query across all collections.
+
 ### 7 agents
 
 | Agent | Role |
 |-------|------|
 | **Orchestrator** | Assesses query complexity; simple → synthesis, complex → planner |
 | **Planner** | Breaks query into search routes: `[(collection, subquery), ...]` |
-| **Query Rewriter** | Rewrites routes into search-optimized queries; handles feedback from iteration |
+| **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); broad-fallback single query on iteration when the Planner found no route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
 | **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step |
 | **Synthesis** | Generates final answer with source citations |
@@ -93,10 +99,10 @@ A Python-only UI: **projects on the left, chat on the right**.
 src/                      # RAG engine (graph + vectordb), unchanged by the UI
 ├── agents/               # 7 agents + common LLM factory (get_structured_llm)
 │   ├── orchestrator.py   #   Command(goto="synthesis" | "planner")
-│   ├── planner.py        #   Command(goto="query_rewriter")
-│   ├── query_rewriter.py #   Command(goto="search_fanout") — one search_task per route
+│   ├── planner.py        #   Command(goto="query_rewriter" | "synthesis") — re-routes on iteration
+│   ├── query_rewriter.py #   Command(goto="search_fanout") — one search_task per route (gather)
 │   ├── search_fanout.py  #   Command(goto="sufficient_context") — all (collection,query) pairs
-│   ├── sufficient_context.py  # Command(goto="synthesis" | "query_rewriter" | "give_up")
+│   ├── sufficient_context.py  # Command(goto="synthesis" | "planner" | "give_up")
 │   ├── synthesis.py      #   Command(goto=END)
 │   └── give_up.py        #   Command(goto=END) — system refusal, no LLM
 ├── vectordb/             # embeddings, LanceDB client, @tools, hybrid indexer
@@ -117,8 +123,8 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
    - **Retrieved snippets** — do they contain the needed facts?
    - **Draft answer** — can we construct a complete answer?
    - **Missing pieces** — *what exactly* is missing and *where* to find it
-2. If insufficient + iterations left → returns `Command(goto="query_rewriter")` with `feedback="search for X in Y"`
-3. Query Rewriter sees feedback → generates a targeted query for the missing piece
+2. If insufficient + iterations left → returns `Command(goto="planner")` with `feedback="search for X in Y"` and `missing_parts`
+3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter. If it finds no relevant route, the Query Rewriter falls back to one targeted query across all collections
 4. Search Fanout searches again → Sufficient Context checks again
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
 6. Give Up node builds an honest refusal: what was found, what's missing, why
