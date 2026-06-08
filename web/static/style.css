@@ -30,9 +30,10 @@ body,
   background: #16a34a;           /* green-600 — dark green when selected */
   color: #ffffff;                /* name label inherits white */
 }
-/* Selected (dark green) card: menu icon stays light too. */
-.project-card.active .q-btn {
-  color: #ffffff;
+/* Selected (dark green) card: menu icon stays white so it's visible. */
+.project-card.active .q-btn,
+.project-card.active .q-btn .q-icon {
+  color: #ffffff !important;
 }
 
 /* "Open in chat" button colors come from Quasar props (color/text-color),
