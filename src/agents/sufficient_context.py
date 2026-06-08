@@ -27,7 +27,7 @@ User question: {query}
 Complete knowledge base inventory (GROUND TRUTH — these are ALL the collections that exist, with a short description of each):
 {inventory}
 
-Retrieved context from searches:
+Retrieved context from searches (each block is tagged with the collection it came from):
 {search_results}
 
 Iteration: {iteration} of {max_iterations}
@@ -45,15 +45,15 @@ Analyze THREE things:
    - What alternative search terms should be tried?
 
 Rules:
-- If ALL parts of the question can be answered from the context → sufficient=True
-- If ANY part is missing → sufficient=False, provide detailed feedback
-- It's better to flag as insufficient and search again than to guess
-- Be honest — do NOT set sufficient=True if information is missing
-- The inventory above is the COMPLETE and AUTHORITATIVE list of every document in
-  the knowledge base. Do NOT mark context insufficient on the grounds that "there
-  might be more collections/documents" — there are not; the inventory is exhaustive.
-  For "describe/list ALL files"-type questions, full coverage means every collection
-  in the inventory has been searched OR is adequately summarized by its description."""
+- If ALL parts of the question can be answered from the retrieved context → sufficient=True
+- If ANY part is missing → sufficient=False, with specific feedback (what's missing, which collection to search next)
+- A "not found / not defined / not mentioned" answer is NOT sufficient while any collection that could plausibly hold the answer has NOT been searched yet — set sufficient=False and route there
+- It's better to flag insufficient and search again than to guess
+- Be consistent: if your feedback says to search more, then sufficient MUST be False
+
+How to use the inventory (it is the COMPLETE, authoritative list of every document — there are no others):
+- "Describe/list ALL files"-type questions → full coverage means every collection has been searched OR is adequately summarized by its description. The inventory is exhaustive, so you CAN confirm completeness — do not demand proof of more documents.
+- SPECIFIC questions (e.g. "what is X") → if the answer is NOT in the retrieved chunks, compare the inventory against the collections that actually appear in the retrieved context above. If any collection that is NOT yet among them has a description suggesting it could contain the answer, set sufficient=False and name that collection in feedback/missing_parts. Only accept a negative answer once every plausibly-relevant collection has actually been searched."""
 
 
 async def sufficient_context_node(

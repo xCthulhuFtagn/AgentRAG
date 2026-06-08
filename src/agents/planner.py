@@ -45,12 +45,16 @@ Feedback from the context checker: {feedback}
 Available collections:
 {collections}
 
+Already searched (did NOT yield the answer): {searched}
+
 For each collection that could plausibly contain a missing piece, create a RouteStep:
 - collection: the exact table name (must match available collections)
 - subquery: a focused query for the missing piece — use ALTERNATIVE keywords or a
   different angle than what was already tried
 - rationale: why this collection might hold the missing piece
 
+Strongly PREFER collections that have NOT been searched yet — re-routing to an
+already-searched collection only makes sense with a genuinely different subquery.
 Prefer the 1-3 most relevant collections. If no collection looks relevant,
 return an empty steps list — the system will then broaden the search to all."""
 
@@ -84,11 +88,20 @@ async def planner_node(
     is_iteration = iteration > 0 and bool(feedback)
 
     if is_iteration:
+        searched_cols = sorted(
+            {
+                r.get("collection")
+                for r in state.get("search_results", [])
+                if r.get("collection")
+            }
+        )
+        searched_str = ", ".join(searched_cols) if searched_cols else "(none yet)"
         prompt = PLANNER_ITERATION_PROMPT.format(
             query=state["query"],
             missing_parts=", ".join(state.get("missing_parts", [])) or "(unspecified)",
             feedback=feedback,
             collections=collections_str,
+            searched=searched_str,
         )
     else:
         prompt = PLANNER_PROMPT.format(
