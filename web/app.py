@@ -248,11 +248,30 @@ def index():
             ).classes("w-full flex justify-end")
         else:
             with ui.column().classes("w-full gap-1 min-w-0"):
+                total_in = total_out = 0
                 for t in m.get("trace", []):
                     agent = html.escape(str(t.get("agent", "")))
                     decision = html.escape(str(t.get("decision", "")))
+                    ti = int(t.get("input_tokens", 0) or 0)
+                    to = int(t.get("output_tokens", 0) or 0)
+                    total_in += ti
+                    total_out += to
+                    tok_line = (
+                        f"tokens · in {ti:,} / out {to:,} · Σ {ti + to:,}"
+                        if (ti or to)
+                        else "tokens · —"
+                    )
                     ui.html(
-                        f"<div class='trace-step'>🔵 {agent}: {decision}</div>"
+                        "<div class='trace-step'>"
+                        f"<div class='trace-step-main'>🔵 {agent}: {decision}</div>"
+                        f"<div class='trace-step-tok'>{tok_line}</div>"
+                        "</div>"
+                    )
+                if (total_in or total_out) and m.get("trace"):
+                    ui.html(
+                        "<div class='trace-total'>"
+                        f"Σ tokens — in {total_in:,} / out {total_out:,} "
+                        f"· total {total_in + total_out:,}</div>"
                     )
                 if m.get("text"):
                     ui.markdown(m["text"]).classes("chat-bubble-assistant")

@@ -5,7 +5,8 @@ single query from the project's documents; it carries no conversation history,
 so accumulating reducers (search_results, trace) must not bleed across messages.
 
 Yields tuples:
-    ("trace", {agent, decision, detail})   — one per agent step, live
+    ("trace", {agent, decision, detail, input_tokens, output_tokens})
+                                             — one per agent step, live
     ("answer", str)                          — the final answer
 """
 

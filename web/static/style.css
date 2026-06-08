@@ -83,7 +83,7 @@ body,
   font-size: 1rem;
 }
 
-/* Agent trace step chips */
+/* Agent trace step chips — two lines: decision + token cost */
 .trace-step {
   font-family: ui-monospace, monospace;
   font-size: 0.9rem;
@@ -93,6 +93,22 @@ body,
   padding: 3px 9px;
   margin: 2px 0;
   border-radius: 4px;
+}
+.trace-step-tok {
+  font-size: 0.78rem;
+  color: #60a5fa;                /* blue-400 — muted, secondary line */
+  margin-top: 1px;
+}
+/* Per-message token total */
+.trace-total {
+  font-family: ui-monospace, monospace;
+  font-size: 0.82rem;
+  color: #1e40af;                /* blue-800 */
+  background: #dbeafe;           /* blue-100 */
+  border-radius: 4px;
+  padding: 3px 9px;
+  margin: 3px 0 2px;
+  align-self: flex-start;
 }
 
 .chat-bubble-user {
