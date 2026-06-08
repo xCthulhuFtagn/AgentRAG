@@ -3,13 +3,33 @@
 TypedDict with Annotated reducers for accumulation across iterations.
 """
 
+import json
 import operator
 from typing import Annotated, Any, Optional, TypedDict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── Structured output schemas (Pydantic — used by LLM.with_structured_output) ──
+
+def _coerce_list(v):
+    """Coerce a list field that arrived as a JSON-encoded string back to a list.
+
+    DeepSeek's function-calling sometimes serializes an array argument as a
+    string (e.g. missing_parts='["a","b"]' instead of ["a","b"]), which fails
+    Pydantic's list validation and crashes the whole graph run. Parse the string
+    as JSON when possible; a non-JSON string becomes a single-item list.
+    """
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return []
+        try:
+            parsed = json.loads(s)
+            return parsed if isinstance(parsed, list) else [s]
+        except (ValueError, TypeError):
+            return [s]
+    return v
 
 class RouteStep(BaseModel):
     """A single search route from the Planner.
@@ -27,6 +47,8 @@ class PlanResult(BaseModel):
     """Planner output: breakdown of the query into search routes."""
     is_multi_step: bool = Field(description="Whether this requires multiple search steps")
     steps: list[RouteStep] = Field(description="Search routes to execute")
+
+    _coerce_steps = field_validator("steps", mode="before")(_coerce_list)
 
 
 class OrchestratorResult(BaseModel):
@@ -63,6 +85,8 @@ class SufficientContextResult(BaseModel):
         default_factory=list,
         description="Concrete pieces still missing. Empty if the draft already answers the question.",
     )
+
+    _coerce_missing = field_validator("missing_parts", mode="before")(_coerce_list)
     sufficient: bool = Field(
         description="The VERDICT, decided after reason/draft/missing above. True ONLY if draft_answer is a positive, substantive answer grounded in the retrieved chunks. A 'not found / absent / not mentioned' draft is NOT sufficient — set False while any plausibly-relevant collection is still unsearched."
     )
