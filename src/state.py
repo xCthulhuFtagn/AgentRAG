@@ -31,20 +31,34 @@ class OrchestratorResult(BaseModel):
 
 
 class SufficientContextResult(BaseModel):
-    """Sufficient Context Agent output."""
-    sufficient: bool = Field(description="Is there enough context to answer?")
-    reason: str = Field(description="Why context is sufficient or not")
-    feedback: str = Field(
-        default="",
-        description="Specific search instructions if insufficient: what to look for and where",
-    )
-    missing_parts: list[str] = Field(
-        default_factory=list,
-        description="Concrete pieces of information still missing",
+    """Sufficient Context Agent output.
+
+    Schema-Guided Reasoning: fields follow the order a person would reason in,
+    because structured output is generated field-by-field in declaration order.
+    First the analysis (reason), then the attempted answer (draft_answer), then
+    the gaps (missing_parts); then the `sufficient` verdict — grounded in all of
+    the above instead of committed up front and rationalized afterward (which let
+    "not found" drafts pass as True). `feedback` comes LAST of all: deciding what
+    to search next is a consequence of having concluded insufficiency, so it is
+    chosen after the verdict, not before it.
+    """
+    reason: str = Field(
+        description="Analysis FIRST: do the retrieved chunks contain a positive, substantive answer to every part of the question? State what is present and what is absent."
     )
     draft_answer: str = Field(
         default="",
-        description="Draft answer based on current context",
+        description="The best answer built ONLY from the retrieved context. If the context does not contain it, say so plainly — do not fill this in from general knowledge.",
+    )
+    missing_parts: list[str] = Field(
+        default_factory=list,
+        description="Concrete pieces still missing. Empty if the draft already answers the question.",
+    )
+    sufficient: bool = Field(
+        description="The VERDICT, decided after reason/draft/missing above. True ONLY if draft_answer is a positive, substantive answer grounded in the retrieved chunks. A 'not found / absent / not mentioned' draft is NOT sufficient — set False while any plausibly-relevant collection is still unsearched."
+    )
+    feedback: str = Field(
+        default="",
+        description="LAST: only when sufficient is False — specific next-search instructions chosen to fill the gap (what to look for and which collection).",
     )
 
 
