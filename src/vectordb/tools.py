@@ -83,6 +83,22 @@ def _merge_windows(
     return [(lo, hi) for lo, hi in merged]
 
 
+def _strip_overlap(prev: str, cur: str, max_overlap: int) -> str:
+    """Drop cur's leading text that duplicates prev's tail (chunk overlap).
+
+    Consecutive chunks share ~CHUNK_OVERLAP chars by construction, but the real
+    overlap drifts (strip/clean_text) and isn't a fixed length — so we find the
+    longest suffix of prev that is a prefix of cur and cut it, rather than
+    blindly removing CHUNK_OVERLAP chars. Search is bounded to max_overlap for
+    speed and to avoid over-matching coincidental repetition.
+    """
+    window = min(len(prev), len(cur), max_overlap)
+    for k in range(window, 0, -1):
+        if prev[-k:] == cur[:k]:
+            return cur[k:].lstrip()
+    return cur
+
+
 async def gather_neighbors(
     collection: str,
     hit_seqs: list[int],
@@ -117,7 +133,19 @@ async def gather_neighbors(
         for r in rows:
             by_seq[r["seq"]] = r.get("text", "")
 
-    return [{"seq": s, "text": by_seq[s]} for s in sorted(by_seq)][:cap]
+    result = [{"seq": s, "text": by_seq[s]} for s in sorted(by_seq)][:cap]
+
+    # De-overlap consecutive chunks: a stitched run shares the chunk overlap at
+    # each boundary, so strip the duplicated prefix. Only between truly adjacent
+    # seqs (within a merged range) — never across a gap. prev's tail is intact
+    # even if prev was itself front-stripped, so comparing against it is correct.
+    max_ol = 2 * vdb_settings.chunk_overlap
+    for i in range(1, len(result)):
+        if result[i]["seq"] == result[i - 1]["seq"] + 1:
+            result[i]["text"] = _strip_overlap(
+                result[i - 1]["text"], result[i]["text"], max_ol
+            )
+    return result
 
 
 @tool
