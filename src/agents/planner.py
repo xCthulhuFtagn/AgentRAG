@@ -33,6 +33,27 @@ If the query needs information from multiple collections, create multiple steps.
 If the query can be answered from a single collection, create one step.
 If no relevant collection exists, return an empty steps list."""
 
+PLANNER_ITERATION_PROMPT = """You are the Planner Agent of an Agentic RAG system.
+
+This is an ITERATION — earlier searches did not find everything needed. Re-route
+the search to the collection(s) most likely to hold the MISSING information.
+
+Original user question: {query}
+Still missing: {missing_parts}
+Feedback from the context checker: {feedback}
+
+Available collections:
+{collections}
+
+For each collection that could plausibly contain a missing piece, create a RouteStep:
+- collection: the exact table name (must match available collections)
+- subquery: a focused query for the missing piece — use ALTERNATIVE keywords or a
+  different angle than what was already tried
+- rationale: why this collection might hold the missing piece
+
+Prefer the 1-3 most relevant collections. If no collection looks relevant,
+return an empty steps list — the system will then broaden the search to all."""
+
 
 async def planner_node(
     state: AgentRAGState, *, config: RunnableConfig
@@ -54,23 +75,43 @@ async def planner_node(
         else "(no collections yet — index some documents first)"
     )
 
-    prompt = PLANNER_PROMPT.format(
-        query=state["query"],
-        collections=collections_str,
-    )
+    # Iteration mode: the Sufficient Context Agent sent us back to RE-ROUTE for
+    # the missing pieces (Google's loop re-enters before Search Plan). Plan a
+    # narrow route to the collection(s) most likely to hold what's missing,
+    # instead of blindly searching every collection.
+    iteration = state.get("iteration_count", 0)
+    feedback = state.get("feedback", "")
+    is_iteration = iteration > 0 and bool(feedback)
+
+    if is_iteration:
+        prompt = PLANNER_ITERATION_PROMPT.format(
+            query=state["query"],
+            missing_parts=", ".join(state.get("missing_parts", [])) or "(unspecified)",
+            feedback=feedback,
+            collections=collections_str,
+        )
+    else:
+        prompt = PLANNER_PROMPT.format(
+            query=state["query"],
+            collections=collections_str,
+        )
     plan: PlanResult = await get_structured_llm(PlanResult).ainvoke(prompt)
 
     steps_dicts = [s.model_dump() for s in plan.steps]
 
+    mode = "iteration" if is_iteration else "initial"
     trace_entry = make_trace_entry(
         agent="planner",
-        decision=f"{len(plan.steps)} route(s)",
+        decision=f"{mode}: {len(plan.steps)} route(s)",
         detail=str(steps_dicts),
     )
 
     if not plan.steps:
+        # No relevant route. On iteration, hand off to query_rewriter so it can
+        # broaden the search to all collections (the safety net). On the initial
+        # turn, there's nothing to search → synthesize from what we have.
         return Command(
-            goto="synthesis",
+            goto="query_rewriter" if is_iteration else "synthesis",
             update={
                 "plan_steps": [],
                 "trace": [trace_entry],

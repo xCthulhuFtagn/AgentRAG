@@ -7,7 +7,7 @@ Checks three things before allowing a response:
 
 Routes:
 - sufficient → Command(goto="synthesis")
-- insufficient + iterations left → Command(goto="query_rewriter") with feedback
+- insufficient + iterations left → Command(goto="planner") with feedback (re-route)
 - insufficient + max iterations → Command(goto="give_up")
 """
 
@@ -55,7 +55,7 @@ async def sufficient_context_node(
 
     Three outcomes:
     1. sufficient=True  → Command(goto="synthesis")      — normal answer
-    2. insufficient + iterations left → Command(goto="query_rewriter") — search more
+    2. insufficient + iterations left → Command(goto="planner") — re-route & search more
     3. insufficient + max iterations  → Command(goto="give_up") — system refusal
     """
     max_iter = state.get("max_iterations", general_settings.max_iterations)
@@ -116,10 +116,14 @@ async def sufficient_context_node(
             },
         )
 
-    # ── Outcome 2: insufficient, but iterations left → search more ──
+    # ── Outcome 2: insufficient, but iterations left → re-route & search more ──
+    # Go back to the Planner (not query_rewriter): it re-routes to the
+    # collection most likely to hold the missing piece, instead of blindly
+    # searching every collection. Mirrors Google's loop that re-enters before
+    # Search Plan.
     if iteration < max_iter:
         return Command(
-            goto="query_rewriter",
+            goto="planner",
             update={
                 "sufficient": False,
                 "sufficient_reason": result.reason,

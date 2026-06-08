@@ -54,9 +54,12 @@ async def query_rewriter_node(
     # collection=None means "search across all collections".
     search_tasks: list[dict] = []
 
-    if feedback and state.get("iteration_count", 0) > 0:
-        # ── Iteration mode: single targeted rewrite ──
-        # We don't know which file holds the missing piece → search all (None).
+    plan_steps = state.get("plan_steps", [])
+    if feedback and state.get("iteration_count", 0) > 0 and not plan_steps:
+        # ── Iteration fallback: planner found no relevant route to re-target ──
+        # On iteration the Planner normally re-routes to the collection holding
+        # the missing piece. Only if it couldn't (empty plan_steps) do we fall
+        # back to a single targeted query across ALL collections (collection=None).
         prompt = REWRITER_ITERATION_PROMPT.format(
             original_query=state["query"],
             missing_parts=", ".join(state.get("missing_parts", [])),
@@ -74,8 +77,9 @@ async def query_rewriter_node(
             detail=f"query='{result}' (all collections)",
         )
     else:
-        # ── Initial mode: rewrite ALL plan routes, one task per route ──
-        plan_steps = state.get("plan_steps", [])
+        # ── Rewrite ALL plan routes, one task per route ──
+        # Reached on the initial turn and on iterations where the Planner
+        # re-routed (plan_steps populated) to target the missing piece.
         if not plan_steps:
             rewritten = [state["query"]]  # fallback: use original query
             search_tasks = [{"collection": None, "query": state["query"]}]

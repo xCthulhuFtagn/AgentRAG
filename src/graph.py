@@ -31,25 +31,26 @@ def build_graph() -> StateGraph:
           └⟶ Command(goto="planner")
                 │
                 ▼
-              planner
-                │
-                └⟶ Command(goto="query_rewriter")
-                      │
-                      ▼
-                  query_rewriter ◄────────────────┐
-                      │                           │
-                      └⟶ Command(goto="search")    │
-                            │                      │
-                            ▼                      │
-                        search_fanout              │
-                            │                      │
-                            └⟶ Command(goto=       │
-                                "sufficient")      │
-                                  │                │
-                                  ▼                │
-                          sufficient_context ──────┘
+              planner ◄───────────────────────────┐
+                │                                  │
+                └⟶ Command(goto="query_rewriter")   │
+                      │  (or "synthesis" if no route)│
+                      ▼                             │
+                  query_rewriter                    │
+                      │                             │
+                      └⟶ Command(goto="search")      │
+                            │                        │
+                            ▼                        │
+                        search_fanout                │
+                            │                        │
+                            └⟶ Command(goto=         │
+                                "sufficient")        │
+                                  │                  │
+                                  ▼                  │
+                          sufficient_context ────────┘
                             │        insufficient + iters left:
-                            │        Command(goto="query_rewriter")
+                            │        Command(goto="planner") — re-route to the
+                            │        collection holding the missing piece
                             │
                             ├⟶ sufficient:
                             │  Command(goto="synthesis")

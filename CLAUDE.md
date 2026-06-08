@@ -16,23 +16,30 @@ orchestrator ──simple──► synthesis ──► END
      │ complex
      ▼
   planner → query_rewriter → search_fanout → sufficient_context
-                ▲                                  │
-                │    insufficient + iters left      │
-                └──────────────────────────────────┘
-                                                   │
-                         sufficient ──► synthesis ──► END
-                         insufficient + max iters ──► give_up ──► END
+     ▲                                           │
+     │       insufficient + iters left           │
+     └───────────────────────────────────────────┘
+     (re-route: planner re-plans for the missing piece)
+                                                 │
+                       sufficient ──► synthesis ──► END
+                       insufficient + max iters ──► give_up ──► END
 ```
+
+The loop re-enters at **planner**, not query_rewriter — on iteration the Planner
+re-routes to the collection(s) most likely to hold the missing piece (mirrors
+Google RAG Engine's loop that re-enters before its Search Plan agent). Only if
+the Planner finds no relevant route does it fall through to query_rewriter's
+broad fallback (search all collections, `collection=None`).
 
 ## Nodes (7 total)
 
 | # | Node | Returns |
 |---|------|---------|
 | 1 | orchestrator | `Command(goto="synthesis" \| "planner")` |
-| 2 | planner | `Command(goto="query_rewriter" \| "synthesis")` |
+| 2 | planner | `Command(goto="query_rewriter" \| "synthesis")` — `"query_rewriter"` also when iterating with no route (broad fallback); `"synthesis"` only on the initial turn with no route |
 | 3 | query_rewriter | `Command(goto="search_fanout")` |
 | 4 | search_fanout | `Command(goto="sufficient_context")` |
-| 5 | sufficient_context | `Command(goto="synthesis" \| "query_rewriter" \| "give_up")` |
+| 5 | sufficient_context | `Command(goto="synthesis" \| "planner" \| "give_up")` — `"planner"` re-routes for the missing piece |
 | 6 | synthesis | `Command(goto=END)` |
 | 7 | give_up | `Command(goto=END)` — system refusal, no LLM |
 
@@ -50,7 +57,7 @@ orchestrator ──simple──► synthesis ──► END
 ## State accumulation & DB scope
 
 - `search_results`, `rewritten_queries`, `trace` use `operator.add` reducer — each Command.update appends. Critical for the iteration loop.
-- `search_tasks` (no reducer, overwrite) carries `[{collection, query}]` for the current turn. `collection=None` → search ALL collections (used on iteration, when the missing piece's file is unknown).
+- `search_tasks` (no reducer, overwrite) carries `[{collection, query}]` for the current turn. `collection=None` → search ALL collections (the iteration **fallback**, only when the Planner couldn't re-route to a specific collection).
 - `db_path` (set by `make_initial_state(db_path=...)`, default None=global `LANCE_DB_PATH`) scopes every search to one LanceDB → per-project isolation. Threaded into `vector_search`/`list_collections`.
 
 ## Multi-file search
@@ -115,10 +122,10 @@ All have defaults — only `DEEPSEEK_API_KEY` is required. Access values via the
 
 Sufficient Context Agent returns:
 - Sufficient → `Command(goto="synthesis")`
-- Insufficient + iters left → `Command(goto="query_rewriter")` with `feedback`, `missing_parts`
+- Insufficient + iters left → `Command(goto="planner")` with `feedback`, `missing_parts` (re-route)
 - Insufficient + max iters → `Command(goto="give_up")` (system refusal, no LLM)
 
-Query Rewriter checks `state["feedback"]` — if set, generates targeted query for missing piece instead of rewriting all routes. Max iterations: 3.
+**Re-routing on iteration.** The loop re-enters at the **Planner**: with `feedback` + `iteration_count > 0` set, `planner` uses `PLANNER_ITERATION_PROMPT` to re-route to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to `query_rewriter` as usual. If the Planner finds no relevant route, it goes to `query_rewriter`, which falls back to a single targeted query across ALL collections (`collection=None`). `query_rewriter` thus has two modes: rewrite the Planner's routes (initial turn **and** re-routed iterations), or the broad fallback (iteration with empty `plan_steps`). Max iterations: 3.
 
 ## Running
 
