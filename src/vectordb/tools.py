@@ -8,6 +8,7 @@ from langchain_core.tools import tool
 from src.vectordb.config import vdb_settings
 from src.vectordb.embeddings import embed
 from src.vectordb.client import get_async_db
+from src.vectordb.descriptions import load_descriptions
 
 
 @tool
@@ -148,6 +149,22 @@ async def gather_neighbors(
     return result
 
 
+async def _list_table_names(db_path: str | None = None) -> list[str]:
+    """Walk LanceDB's paginated table listing into a flat list of names."""
+    db = await get_async_db(db_path)
+    # Async LanceDB: list_tables() (table_names() is deprecated) returns a
+    # paginated ListTablesResponse — walk page_token to collect every name.
+    names: list[str] = []
+    page_token = None
+    while True:
+        resp = await db.list_tables(page_token=page_token)
+        names.extend(resp.tables)
+        page_token = resp.page_token
+        if not page_token:
+            break
+    return names
+
+
 @tool
 async def list_collections(db_path: str | None = None) -> list[str]:
     """List all available LanceDB collections (tables).
@@ -162,15 +179,19 @@ async def list_collections(db_path: str | None = None) -> list[str]:
     Returns:
         List of collection/table names.
     """
-    db = await get_async_db(db_path)
-    # Async LanceDB: list_tables() (table_names() is deprecated) returns a
-    # paginated ListTablesResponse — walk page_token to collect every name.
-    names: list[str] = []
-    page_token = None
-    while True:
-        resp = await db.list_tables(page_token=page_token)
-        names.extend(resp.tables)
-        page_token = resp.page_token
-        if not page_token:
-            break
-    return names
+    return await _list_table_names(db_path)
+
+
+async def list_collections_described(db_path: str | None = None) -> list[dict]:
+    """List collections paired with their per-file content description.
+
+    Returns [{collection, description}] — the description (from the sidecar
+    written at index time) helps the Planner pick a source from a summary, not
+    just the table name. Empty description for tables indexed before the feature.
+    """
+    names = await _list_table_names(db_path)
+    descs = load_descriptions(db_path)
+    return [
+        {"collection": n, "description": descs.get(n, {}).get("description", "")}
+        for n in names
+    ]

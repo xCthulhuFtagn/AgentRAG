@@ -9,16 +9,18 @@ from langgraph.types import Command
 
 from src.state import AgentRAGState, PlanResult, make_trace_entry
 from src.agents.common import get_structured_llm
-from src.vectordb.tools import list_collections
+from src.vectordb.config import vdb_settings
+from src.vectordb.tools import list_collections, list_collections_described
 
 PLANNER_PROMPT = """You are the Planner Agent of an Agentic RAG system.
 
 Your job: break down a complex query into specific search routes, each targeting
 a specific document collection.
 
-First, review the available collections to decide where to search.
+First, review the available collections (with a short description when available) to decide where to search.
 
-Available collections: {collections}
+Available collections:
+{collections}
 
 Then, for each piece of information needed, create a RouteStep with:
 - collection: the exact table name to search (must match available collections)
@@ -36,10 +38,19 @@ async def planner_node(
     state: AgentRAGState, *, config: RunnableConfig
 ) -> Command:
     """Planner: create search routes, then command query_rewriter."""
-    collections = await list_collections.ainvoke({"db_path": state.get("db_path")})
+    db_path = state.get("db_path")
+    if vdb_settings.descriptions_enabled:
+        described = await list_collections_described(db_path)
+        lines = [
+            f"- {c['collection']} — {c['description'] or '(no description)'}"
+            for c in described
+        ]
+    else:
+        names = await list_collections.ainvoke({"db_path": db_path})
+        lines = [f"- {n}" for n in names]
     collections_str = (
-        ", ".join(collections)
-        if collections
+        "\n".join(lines)
+        if lines
         else "(no collections yet — index some documents first)"
     )
 

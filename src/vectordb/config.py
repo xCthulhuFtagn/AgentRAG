@@ -37,6 +37,12 @@ class VectorDBSettings(BaseSettings):
     chunk_size: int = Field(default=1000, ge=1)
     chunk_overlap: int = Field(default=150, ge=0)
 
+    # ── Per-file descriptions ────────────────────────────────────────────────
+    # When True, indexing generates an LLM summary per file and the Planner
+    # routes using those summaries. When False, no summary is generated and the
+    # Planner sees only table names (no LLM cost at index time).
+    descriptions_enabled: bool = True
+
     # ── Search ───────────────────────────────────────────────────────────────
     # Nearest chunks per (collection, query) before stitching.
     search_top_k: int = Field(default=5, ge=1)

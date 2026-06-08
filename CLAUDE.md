@@ -63,12 +63,16 @@ orchestrator ──simple──► synthesis ──► END
 - `embeddings.py` — FastEmbed (ONNX, `BAAI/bge-small-en-v1.5`, **384d**); `embed`/`embed_batch` run sync ONNX off the loop via `asyncio.to_thread`; model cached `@lru_cache`.
 - `client.py` — `get_async_db(db_path)` / `get_sync_db(db_path)`; `db_path or LANCE_DB_PATH`.
 - `config.py` — `VectorDBSettings` (pydantic-settings, `vdb_settings` instance): all vectordb knobs from `.env` (path, model, chunking, search, stitching). See [Configuration](#configuration).
+- `describe.py` — `describe_document(text)`: LLM reads an excerpt at index time → a 1–2 sentence content summary. Self-contained (builds its own DeepSeek client from `general_settings`, no `agents` import).
+- `descriptions.py` — JSON sidecar (`{db_path}/_descriptions.json`, `table → {file, description}`) storage; `load_descriptions`/`save_descriptions`. Written at index time, read by the Planner.
 - `tools.py` — `vector_search(query, collection, top_k, db_path)` and `list_collections(db_path)` as LangChain `@tool`s. **Async LanceDB gotcha**: `search()` is a coroutine — `q = await table.search(vec)` then `await q.limit(k).to_list()`. Returns chunk `text` + `_distance` (L2, default metric) + `seq` (chunk position). `gather_neighbors(collection, hit_seqs, …)` does the neighbor stitching (filter-scan by `seq`, no vector).
 - `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `clean_text` (collapse ragged whitespace) → `split_text` (RecursiveCharacterTextSplitter, `CHUNK_SIZE`/`CHUNK_OVERLAP` chars, splits on para→line→sentence→word, never mid-word) → `embed_batch` → rows `{text, vector, seq}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`.
 
 **Schema & layout:** one **file → one table** (collection); rows are `{text: str, vector: float[384], seq: int}` (`seq` = chunk index in the document, enables neighbor stitching). Table name = sanitized file stem via `safe_table_name()` (LanceDB allows only `[A-Za-z0-9._-]`; Cyrillic transliterated, hash fallback, collisions disambiguated). Per run each table is `drop_table` + `create_table` (no incremental upsert). No ANN index built → exhaustive search (fine at doc scale).
 
 **Neighbor stitching (deterministic context expansion):** vector search returns the top-k *most similar* chunks, but a contiguous structural block (table of contents, reference list) splits across chunks where only the head ranks high — the tail falls below top-k and the answer truncates. After KNN, `search_fanout` calls `gather_neighbors`: each hit's `seq` becomes a window `[seq-EXPAND_PADDING, seq+EXPAND_PADDING]`; windows merge when the uncovered gap between them is `≤ BRIDGE_GAP` (effective merge distance `2*P + gap + 1`); every chunk in the merged ranges is fetched by `seq` filter-scan and the result is seq-ordered, capped at `MAX_EXPANDED`. Legacy tables without `seq` no-op (reindex to activate). `sufficient_context` shows each chunk seq-tagged so the judge sees contiguity and gaps.
+
+**Per-file descriptions:** at index time `describe_document` (LLM) summarizes each file in 1–2 sentences; stored in `{db_path}/_descriptions.json`. The Planner reads them via `list_collections_described(db_path)` → `[{collection, description}]`, so routing sees a content summary, not just the table name. Legacy tables (indexed before the feature) → empty description; reindex to populate.
 
 **Storage & isolation:** everything under `data/` (auto-created by `get_async_db`/`get_sync_db` via `mkdir(parents=True)` and by `ProjectStore`). CLI uses global `LANCE_DB_PATH` = `./data/lancedb/_cli` (`_cli` can't collide with project UUIDs and isn't listed as a project). Web gives each project its own dir `data/lancedb/{project_id}/` and threads that `db_path` through state → `vector_search`/`list_collections`, so a project searches only its own files. Reindex = wipe `data/lancedb/{id}` + rebuild from current files. Data persists between runs.
 
@@ -98,6 +102,7 @@ Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, 
 | `EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` | FastEmbed model. **Changing it changes the vector dim → full reindex required** |
 | `CHUNK_SIZE` | `1000` | chunk target (chars); new docs only |
 | `CHUNK_OVERLAP` | `150` | chunk overlap (chars) |
+| `DESCRIPTIONS_ENABLED` | `true` | generate LLM file summaries at index time + Planner routes with them |
 | `SEARCH_TOP_K` | `5` | nearest chunks per (collection, query) before stitching |
 | `EXPAND_PADDING` | `1` | neighbor stitching: window `[seq-P, seq+P]` per hit |
 | `BRIDGE_GAP` | `2` | merge windows when uncovered gap ≤ this |

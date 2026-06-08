@@ -22,6 +22,8 @@ from liteparse import LiteParse
 from src.vectordb.config import vdb_settings
 from src.vectordb.embeddings import embed_batch
 from src.vectordb.client import get_sync_db
+from src.vectordb.describe import describe_document
+from src.vectordb.descriptions import save_descriptions
 
 # Rich document formats parsed by LiteParse.
 DOC_SUFFIXES = {".pdf", ".docx", ".pptx"}
@@ -146,6 +148,7 @@ async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_pa
     print(f"Found {len(files)} file(s) to index\n")
 
     used: set[str] = set()
+    descriptions: dict[str, dict] = {}  # table_name -> {file, description}
     for file_path in files:
         base = safe_table_name(file_path.stem)
         table_name = base
@@ -172,7 +175,16 @@ async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_pa
         chunks = await asyncio.to_thread(split_text, text)
         print(f"    {len(chunks)} chunks, embedding...")
 
-        embeddings = await embed_batch(chunks)
+        # Embedding and the (optional) LLM description are independent given the
+        # text — run them concurrently so the description adds little wall-clock.
+        if vdb_settings.descriptions_enabled:
+            embeddings, description = await asyncio.gather(
+                embed_batch(chunks),
+                describe_document(text),
+            )
+        else:
+            embeddings = await embed_batch(chunks)
+            description = ""
 
         # seq = chunk's position in the document — lets the retriever stitch
         # back contiguous neighborhoods (see gather_neighbors in tools.py).
@@ -188,8 +200,11 @@ async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_pa
             pass
 
         await asyncio.to_thread(db.create_table, table_name, data=records)
+        descriptions[table_name] = {"file": file_path.name, "description": description}
         print(f"    Done — {len(records)} vectors stored")
 
+    # Persist per-file descriptions next to the DB for the Planner to read.
+    save_descriptions(db_path, descriptions)
     print(f"\nIndexing complete. DB at: {db_path}")
 
 
