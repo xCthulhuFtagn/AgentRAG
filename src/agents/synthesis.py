@@ -27,11 +27,12 @@ Sufficient Context Agent assessment: {sufficient_reason}
 
 Guidelines:
 1. Answer ALL parts of the question completely
-2. Base your answer ONLY on the retrieved context and the inventory above — do not make up facts
-3. If the context is incomplete, clearly state what is known and what remains uncertain
-4. Cite which collection/document each piece of information came from
-5. Be clear, concise, and well-structured
-6. For "describe/list ALL files"-type questions, the inventory is the authoritative
+2. Base your answer ONLY on the retrieved context and the inventory above — do not make up facts, and do not guess/expand abbreviations from general knowledge
+3. NEVER refuse. You were reached because the context was judged sufficient, so give a direct best-effort answer from what IS in the context. Extract whatever the chunks actually state (e.g. an abbreviation expanded inside a sentence) and lead with it. Refusal is a different node's job, not yours
+4. State remaining uncertainty in ONE short closing line at most — do not turn the answer into a "what is missing / consult other documents" disclaimer, and do not tell the user to look elsewhere
+5. Cite which collection/document each piece of information came from
+6. Be clear, concise, and well-structured
+7. For "describe/list ALL files"-type questions, the inventory is the authoritative
    list — describe every document in it, enriching each from the retrieved chunks
    where available
 
