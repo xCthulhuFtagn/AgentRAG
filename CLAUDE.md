@@ -81,6 +81,8 @@ broad fallback (search all collections, `collection=None`).
 
 **Per-file descriptions:** at index time `describe_document` (LLM) summarizes each file in 1–2 sentences; stored in `{db_path}/_descriptions.json`. The Planner reads them via `list_collections_described(db_path)` → `[{collection, description}]`, so routing sees a content summary, not just the table name. Legacy tables (indexed before the feature) → empty description; reindex to populate.
 
+**Corpus inventory → judge & synthesis:** the same `list_collections_described` list is also injected (as `get_inventory_str` in `agents/common.py`) into the **Sufficient Context** and **Synthesis** prompts as the *complete, authoritative* inventory of the knowledge base. This closes an epistemic gap: vector search returns similar chunks but never proves it has seen every document, so for "describe/list ALL files"-type queries the judge could never confirm completeness and the loop always ended in `give_up`. With the ground-truth inventory the judge can confirm full coverage (every collection searched or summarized) and Synthesis can describe every file from its summary even where chunks are thin.
+
 **Storage & isolation:** everything under `data/` (auto-created by `get_async_db`/`get_sync_db` via `mkdir(parents=True)` and by `ProjectStore`). CLI uses global `LANCE_DB_PATH` = `./data/lancedb/_cli` (`_cli` can't collide with project UUIDs and isn't listed as a project). Web gives each project its own dir `data/lancedb/{project_id}/` and threads that `db_path` through state → `vector_search`/`list_collections`, so a project searches only its own files. Reindex = wipe `data/lancedb/{id}` + rebuild from current files. Data persists between runs.
 
 ## web module (NiceGUI)

@@ -16,13 +16,16 @@ from langgraph.types import Command
 
 from src.config import general_settings
 from src.state import AgentRAGState, SufficientContextResult, make_trace_entry
-from src.agents.common import get_structured_llm
+from src.agents.common import get_structured_llm, get_inventory_str
 
 SUFFICIENT_CONTEXT_PROMPT = """You are the Sufficient Context Agent — the quality-control inspector of an Agentic RAG system.
 
 Your job: determine if the retrieved context is COMPLETE enough to answer the user's question.
 
 User question: {query}
+
+Complete knowledge base inventory (GROUND TRUTH — these are ALL the collections that exist, with a short description of each):
+{inventory}
 
 Retrieved context from searches:
 {search_results}
@@ -45,7 +48,12 @@ Rules:
 - If ALL parts of the question can be answered from the context → sufficient=True
 - If ANY part is missing → sufficient=False, provide detailed feedback
 - It's better to flag as insufficient and search again than to guess
-- Be honest — do NOT set sufficient=True if information is missing"""
+- Be honest — do NOT set sufficient=True if information is missing
+- The inventory above is the COMPLETE and AUTHORITATIVE list of every document in
+  the knowledge base. Do NOT mark context insufficient on the grounds that "there
+  might be more collections/documents" — there are not; the inventory is exhaustive.
+  For "describe/list ALL files"-type questions, full coverage means every collection
+  in the inventory has been searched OR is adequately summarized by its description."""
 
 
 async def sufficient_context_node(
@@ -82,8 +90,11 @@ async def sufficient_context_node(
     if not results_str:
         results_str = "(No search results yet)"
 
+    inventory = await get_inventory_str(state.get("db_path"))
+
     prompt = SUFFICIENT_CONTEXT_PROMPT.format(
         query=state["query"],
+        inventory=inventory,
         search_results=results_str,
         iteration=iteration,
         max_iterations=max_iter,

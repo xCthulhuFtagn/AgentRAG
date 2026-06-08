@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, make_trace_entry
-from src.agents.common import get_llm
+from src.agents.common import get_llm, get_inventory_str
 
 SYNTHESIS_PROMPT = """You are the Synthesis Agent of an Agentic RAG system.
 
@@ -17,6 +17,9 @@ based on ALL the retrieved context.
 
 User question: {query}
 
+Complete knowledge base inventory (every document that exists, with a short description of each):
+{inventory}
+
 Retrieved context from multiple searches:
 {search_results}
 
@@ -24,10 +27,13 @@ Sufficient Context Agent assessment: {sufficient_reason}
 
 Guidelines:
 1. Answer ALL parts of the question completely
-2. Base your answer ONLY on the retrieved context — do not make up facts
+2. Base your answer ONLY on the retrieved context and the inventory above — do not make up facts
 3. If the context is incomplete, clearly state what is known and what remains uncertain
 4. Cite which collection/document each piece of information came from
 5. Be clear, concise, and well-structured
+6. For "describe/list ALL files"-type questions, the inventory is the authoritative
+   list — describe every document in it, enriching each from the retrieved chunks
+   where available
 
 Context completeness note: {context_note}
 
@@ -61,8 +67,11 @@ async def synthesis_node(
         else "Context may be incomplete — answer what you can, note gaps."
     )
 
+    inventory = await get_inventory_str(state.get("db_path"))
+
     prompt = SYNTHESIS_PROMPT.format(
         query=state["query"],
+        inventory=inventory,
         search_results=results_str,
         sufficient_reason=state.get("sufficient_reason", "Not assessed"),
         context_note=context_note,

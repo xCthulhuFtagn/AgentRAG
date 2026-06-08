@@ -8,8 +8,29 @@ from langchain_openai import ChatOpenAI
 from langgraph.types import Command
 
 from src.config import general_settings
+from src.vectordb.tools import list_collections_described
 
 log = logging.getLogger("agentrag.node")
+
+
+async def get_inventory_str(db_path: str | None) -> str:
+    """The full corpus inventory — every collection plus its description.
+
+    Ground truth for "what's in the knowledge base": the complete list of
+    collections that exist (with their index-time summaries). Given to the
+    Sufficient Context judge so it can confirm completeness on "describe all
+    files"-type queries — vector search returns similar chunks but never proves
+    it has seen every document, so without this the judge can never satisfy an
+    "all/every/complete" request and the loop always ends in give_up. Also given
+    to Synthesis so it can describe each file from its summary.
+    """
+    described = await list_collections_described(db_path)
+    if not described:
+        return "(knowledge base is empty — no collections indexed)"
+    return "\n".join(
+        f"- {c['collection']} — {c['description'] or '(no description)'}"
+        for c in described
+    )
 
 
 def logged_node(fn):

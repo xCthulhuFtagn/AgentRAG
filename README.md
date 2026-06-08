@@ -50,8 +50,8 @@ fallback — a single targeted query across all collections.
 | **Planner** | Breaks query into search routes: `[(collection, subquery), ...]` |
 | **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); broad-fallback single query on iteration when the Planner found no route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
-| **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step |
-| **Synthesis** | Generates final answer with source citations |
+| **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step; also gets the full corpus inventory (ground truth) so it can confirm completeness on "describe all files" queries |
+| **Synthesis** | Generates final answer with source citations; can describe every document from the inventory + retrieved chunks |
 | **Give Up** | System-generated refusal when context is exhausted; no LLM call |
 
 ### Stack
@@ -128,6 +128,8 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 4. Search Fanout searches again → Sufficient Context checks again
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
 6. Give Up node builds an honest refusal: what was found, what's missing, why
+
+The Sufficient Context Agent also receives the **complete corpus inventory** (every collection + its description) as ground truth. Without it, "describe all the files in the knowledge base"-type queries could never satisfy the judge — vector search returns similar chunks but never proves it has seen *every* document, so the loop always ran to `give_up`. With the inventory the judge can confirm full coverage and Synthesis can describe each document from its summary.
 
 ## Vector store (LanceDB)
 
