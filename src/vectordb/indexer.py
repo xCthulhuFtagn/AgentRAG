@@ -152,8 +152,11 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
         used.add(table_name)
         print(f"  Indexing: {file_path.name} → table '{table_name}'")
 
+        # Text extraction (LiteParse/OCR) and chunking are CPU-heavy and fully
+        # synchronous — run them off the event loop so the caller's UI stays
+        # responsive (the web reindex awaits this on the same loop as NiceGUI).
         try:
-            text = extract_text(file_path)
+            text = await asyncio.to_thread(extract_text, file_path)
         except Exception as e:
             print(f"    Error extracting text: {e}")
             continue
@@ -162,7 +165,7 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
             print(f"    Warning: no text extracted")
             continue
 
-        chunks = split_text(text)
+        chunks = await asyncio.to_thread(split_text, text)
         print(f"    {len(chunks)} chunks, embedding...")
 
         embeddings = await embed_batch(chunks)
@@ -172,12 +175,13 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
             for chunk, emb in zip(chunks, embeddings)
         ]
 
+        # Sync LanceDB disk writes — also off-loop.
         try:
-            db.drop_table(table_name, ignore_missing=True)
+            await asyncio.to_thread(db.drop_table, table_name, ignore_missing=True)
         except Exception:
             pass
 
-        db.create_table(table_name, data=records)
+        await asyncio.to_thread(db.create_table, table_name, data=records)
         print(f"    Done — {len(records)} vectors stored")
 
     print(f"\nIndexing complete. DB at: {db_path}")
