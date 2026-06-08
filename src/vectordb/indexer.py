@@ -14,6 +14,7 @@ import asyncio
 import hashlib
 import re
 import sys
+from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
 
@@ -127,10 +128,17 @@ def split_text(
     return [c.strip() for c in splitter.split_text(clean_text(text)) if c.strip()]
 
 
-async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_path):
+async def index_documents(
+    docs_dir: str,
+    db_path: str = vdb_settings.lance_db_path,
+    progress_cb: Callable[[str, bool], None] | None = None,
+):
     """Index all documents from a directory into LanceDB.
 
-    Each file becomes a separate LanceDB collection (table).
+    Each file becomes a separate LanceDB collection (table). `progress_cb`, if
+    given, is called `(filename, ok)` once each file finishes — ok=False when it
+    was skipped (extraction error / no text) — letting a UI show per-file
+    progress and flag failures.
     """
     docs_path = Path(docs_dir)
     if not docs_path.exists():
@@ -166,10 +174,14 @@ async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_pa
             text = await asyncio.to_thread(extract_text, file_path)
         except Exception as e:
             print(f"    Error extracting text: {e}")
+            if progress_cb:
+                progress_cb(file_path.name, False)  # failed → flagged in UI
             continue
 
         if not text.strip():
             print(f"    Warning: no text extracted")
+            if progress_cb:
+                progress_cb(file_path.name, False)
             continue
 
         chunks = await asyncio.to_thread(split_text, text)
@@ -202,6 +214,8 @@ async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_pa
         await asyncio.to_thread(db.create_table, table_name, data=records)
         descriptions[table_name] = {"file": file_path.name, "description": description}
         print(f"    Done — {len(records)} vectors stored")
+        if progress_cb:
+            progress_cb(file_path.name, True)
 
     # Persist per-file descriptions next to the DB for the Planner to read.
     save_descriptions(db_path, descriptions)

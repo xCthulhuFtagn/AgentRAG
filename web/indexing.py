@@ -22,6 +22,7 @@ async def reindex_project(pid: str) -> None:
 
     async with lock:
         runtime.set_status(pid, "reindexing")
+        runtime.start_progress(pid)  # all files pending → UI spins each
         try:
             db_path = store.db_path(pid)
             files_dir = store.files_dir(pid)
@@ -37,6 +38,12 @@ async def reindex_project(pid: str) -> None:
                 for f in files_dir.iterdir()
             )
             if has_files:
-                await index_documents(str(files_dir), db_path)
+                await index_documents(
+                    str(files_dir),
+                    db_path,
+                    progress_cb=lambda fn, ok: runtime.mark_file(pid, fn, ok),
+                )
         finally:
+            # Keep the progress map (failed files stay flagged until the next
+            # reindex); only the frozen status clears.
             runtime.set_status(pid, "idle")

@@ -18,6 +18,10 @@ STORE = ProjectStore()
 _status: dict[str, str] = {}
 # project_id -> asyncio.Lock (serialize reindex per project)
 _locks: dict[str, asyncio.Lock] = {}
+# project_id -> {filename: ok}  (True = indexed, False = failed); a filename
+# absent from the map is still pending. Persists after the reindex so failed
+# files stay flagged until the next one (reset by start_progress).
+_progress: dict[str, dict[str, bool]] = {}
 
 
 def get_status(pid: str) -> str:
@@ -36,3 +40,22 @@ def get_lock(pid: str) -> asyncio.Lock:
     if pid not in _locks:
         _locks[pid] = asyncio.Lock()
     return _locks[pid]
+
+
+def start_progress(pid: str) -> None:
+    """Reset progress at the start of a reindex (all files pending)."""
+    _progress[pid] = {}
+
+
+def mark_file(pid: str, filename: str, ok: bool) -> None:
+    """Record a file as indexed (ok=True) or failed (ok=False)."""
+    _progress.setdefault(pid, {})[filename] = ok
+
+
+def get_progress(pid: str) -> dict[str, bool]:
+    """{filename: ok} — absent filename = pending."""
+    return _progress.get(pid, {})
+
+
+def clear_progress(pid: str) -> None:
+    _progress.pop(pid, None)

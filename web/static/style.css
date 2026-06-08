@@ -124,3 +124,9 @@ body,
   white-space: normal;
   max-width: 100%;
 }
+
+/* Hide the upload widget's built-in file list — staged files are shown
+   separately below with rename/delete actions. */
+.hide-uploader-files .q-uploader__list {
+  display: none;
+}

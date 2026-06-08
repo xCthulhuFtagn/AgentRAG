@@ -154,12 +154,21 @@ def index():
                 with ui.column().classes("w-full gap-1"):
                     if not files:
                         ui.label("No files uploaded").classes("text-gray-400 text-sm")
+                    progress = runtime.get_progress(pid)
                     for f in files:
                         with ui.row().classes("w-full items-center no-wrap"):
                             ui.icon("description").classes("text-green-600")
                             ui.label(f"{f['name']}  ({f['size']} B)").classes(
                                 "grow text-sm"
                             )
+                            # status: None = pending, True = indexed, False = failed.
+                            status = progress.get(f["name"])
+                            if status is False:
+                                ui.icon("error").classes("text-red-500").tooltip(
+                                    "Indexing failed — this file is not searchable"
+                                )
+                            elif frozen and status is None:
+                                ui.spinner(size="sm").classes("text-green-600")
             edit_btn = ui.button(
                 "Edit files", icon="edit", on_click=lambda _=None, x=pid: enter_edit(x)
             ).props("flat dense").classes("w-full")
@@ -169,11 +178,13 @@ def index():
 
         # ── Edit mode: upload + scrollable staged list + always-visible actions ──
         ui.label("Editing — changes apply on Done").classes("text-xs text-blue-700")
+        # hide-uploader-files: the uploader's own file rows are redundant —
+        # staged files are listed below with rename/delete actions.
         ui.upload(
             on_upload=lambda e: stage_upload(e),
             auto_upload=True,
             multiple=True,
-        ).props(f'accept="{ACCEPT}"').classes("w-full")
+        ).props(f'accept="{ACCEPT}"').classes("w-full hide-uploader-files")
 
         staged_files_list()
 
@@ -271,6 +282,7 @@ def index():
         with ui.dialog() as dialog, ui.card():
             ui.label("New project").classes("font-bold")
             name = ui.input("Project name").props("autofocus")
+            name.on("keydown.enter", lambda: dialog.submit(name.value))
             with ui.row():
                 ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
                 ui.button("Create", on_click=lambda: dialog.submit(name.value))
@@ -306,6 +318,7 @@ def index():
                 ).props("color=red")
         if await dialog:
             STORE.delete(pid)
+            runtime.clear_progress(pid)
             if ctx["edit"] and ctx["edit"]["pid"] == pid:
                 ctx["edit"] = None
             if ctx["open_pid"] == pid:
@@ -480,6 +493,8 @@ def index():
         snap = (
             runtime.is_frozen(ctx["chat_pid"]) if ctx["chat_pid"] else False,
             runtime.is_frozen(ctx["open_pid"]) if ctx["open_pid"] else False,
+            # per-file progress of the open project → refresh as each file finishes
+            len(runtime.get_progress(ctx["open_pid"])) if ctx["open_pid"] else 0,
         )
         if snap != ctx["_frozen_snap"]:
             ctx["_frozen_snap"] = snap
