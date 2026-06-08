@@ -27,10 +27,12 @@ class VectorDBSettings(BaseSettings):
     lance_db_path: str = "./data/lancedb/_cli"
 
     # ── Embeddings (FastEmbed) ───────────────────────────────────────────────
-    # BAAI/bge-small-en-v1.5 → 384 dims. FOOTGUN: changing the model changes the
-    # vector dimension, so existing tables become incompatible → full reindex
-    # required. The dimension is derived from the model, never hardcoded.
-    embedding_model: str = "BAAI/bge-small-en-v1.5"
+    # paraphrase-multilingual-MiniLM-L12-v2 → 384 dims, multilingual (incl.
+    # Russian) — an English-only model (e.g. bge-small-en) blinds retrieval on a
+    # non-English corpus. FOOTGUN: changing the model (even at the same dim)
+    # makes existing vectors incompatible → full reindex required. The dimension
+    # is derived from the model, never hardcoded.
+    embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
 
     # ── Indexing / chunking (chars) ──────────────────────────────────────────
     # Only affects newly indexed documents; reindex to apply to existing ones.

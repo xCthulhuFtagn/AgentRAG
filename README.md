@@ -61,7 +61,7 @@ fallback — a single targeted query across all collections.
 | LLM | DeepSeek (`deepseek-chat`) | OpenAI-compatible API; structured output via function calling |
 | Orchestration | LangGraph | Command-driven edgeless graph |
 | Vector DB | LanceDB | Serverless, async, columnar files; per-project isolation |
-| Embeddings | FastEmbed (`BAAI/bge-small-en-v1.5`) | ONNX, no PyTorch, air-gapped friendly |
+| Embeddings | FastEmbed (`paraphrase-multilingual-MiniLM-L12-v2`) | ONNX, no PyTorch, multilingual (incl. Russian), air-gapped friendly |
 | Parsing | LiteParse + read_text | PDF/DOCX/PPTX via LiteParse (Rust), TXT/MD direct |
 | Web UI | NiceGUI | Python-only, WebSocket live trace, no JS toolchain |
 | Runtime | Full async | `ainvoke`, `astream`, `asyncio.gather` |
@@ -139,7 +139,7 @@ The Sufficient Context Agent also receives the **complete corpus inventory** (ev
 
 1. **Extract** text — hybrid: LiteParse (Rust) for `.pdf/.docx/.pptx`, direct `read_text()` for `.txt/.md` ([indexer.py](src/vectordb/indexer.py)).
 2. **Chunk** — boundary-aware (`RecursiveCharacterTextSplitter`): text is cleaned (ragged PDF whitespace collapsed) then split on paragraph → line → sentence → word boundaries, `CHUNK_SIZE` chars (default `1000`) with `CHUNK_OVERLAP` overlap (default `150`). Never cuts mid-word/sentence.
-3. **Embed** — FastEmbed `BAAI/bge-small-en-v1.5` (ONNX, **384 dims**), batched, run off the event loop via `asyncio.to_thread` ([embeddings.py](src/vectordb/embeddings.py)).
+3. **Embed** — FastEmbed `paraphrase-multilingual-MiniLM-L12-v2` (ONNX, **384 dims**, multilingual incl. Russian), batched, run off the event loop via `asyncio.to_thread` ([embeddings.py](src/vectordb/embeddings.py)).
 4. **Store** — each chunk is a row `{text, vector, seq}` (`seq` = the chunk's position in the document, used for neighbor stitching). **One file → one table** (a "collection"). The table name is the file stem, sanitized to LanceDB's allowed charset (Cyrillic transliterated → `big_statya`, hash fallback otherwise).
 5. **Describe** — an LLM reads an excerpt and writes a 1–2 sentence summary of the file, stored in `{db}/_descriptions.json` ([describe.py](src/vectordb/describe.py)). The **Planner** sees these descriptions (not just table names) so it routes queries to the right source.
 
@@ -188,7 +188,7 @@ MAX_ITERATIONS=3                             # max search→check retries before
 
 # ── Vector DB (vdb_settings) ──
 LANCE_DB_PATH=./data/lancedb/_cli            # CLI/global DB dir (web overrides per project)
-EMBEDDING_MODEL=BAAI/bge-small-en-v1.5       # ⚠ changing it changes the vector dim → full reindex
+EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2   # ⚠ multilingual (RU+), 384d; changing model → full reindex
 CHUNK_SIZE=1000                              # chunk target, chars (new docs only)
 CHUNK_OVERLAP=150                            # chunk overlap, chars
 DESCRIPTIONS_ENABLED=true                    # LLM file summary at index time; Planner routes with it
