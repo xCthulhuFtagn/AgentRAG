@@ -66,6 +66,9 @@ orchestrator ◀── entry_point
 # Install
 pip install -r requirements.txt
 
+# Configure (only DEEPSEEK_API_KEY is required; see Configuration)
+cp .env.example .env && $EDITOR .env
+
 # ── Web UI (projects + chat) ──
 python -m web.app                       # → http://localhost:8080
 
@@ -127,9 +130,9 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 ### How documents become vectors
 
 1. **Extract** text — hybrid: LiteParse (Rust) for `.pdf/.docx/.pptx`, direct `read_text()` for `.txt/.md` ([indexer.py](src/vectordb/indexer.py)).
-2. **Chunk** — boundary-aware (`RecursiveCharacterTextSplitter`): text is cleaned (ragged PDF whitespace collapsed) then split on paragraph → line → sentence → word boundaries, ~`1000` chars with `150` overlap. Never cuts mid-word/sentence.
+2. **Chunk** — boundary-aware (`RecursiveCharacterTextSplitter`): text is cleaned (ragged PDF whitespace collapsed) then split on paragraph → line → sentence → word boundaries, `CHUNK_SIZE` chars (default `1000`) with `CHUNK_OVERLAP` overlap (default `150`). Never cuts mid-word/sentence.
 3. **Embed** — FastEmbed `BAAI/bge-small-en-v1.5` (ONNX, **384 dims**), batched, run off the event loop via `asyncio.to_thread` ([embeddings.py](src/vectordb/embeddings.py)).
-4. **Store** — each chunk is a row `{text, vector}`. **One file → one table** (a "collection"). The table name is the file stem, sanitized to LanceDB's allowed charset (Cyrillic transliterated → `big_statya`, hash fallback otherwise).
+4. **Store** — each chunk is a row `{text, vector, seq}` (`seq` = the chunk's position in the document, used for neighbor stitching). **One file → one table** (a "collection"). The table name is the file stem, sanitized to LanceDB's allowed charset (Cyrillic transliterated → `big_statya`, hash fallback otherwise).
 
 ### How it's stored on disk
 
@@ -147,7 +150,8 @@ Everything lives under `data/` (created automatically). The CLI's global DB is j
 ### How it's queried
 
 - `get_async_db(db_path)` opens a connection scoped to one directory ([client.py](src/vectordb/client.py)). The `db_path` is threaded from graph state, so each project searches **only its own DB** (isolation).
-- `vector_search(query, collection, top_k, db_path)` embeds the query, then `await table.search(vec)` → `.limit(top_k).to_list()`, returning the chunk texts and `_distance` scores (L2, LanceDB default). `list_collections(db_path)` returns the table names so the Planner knows which files exist ([tools.py](src/vectordb/tools.py)).
+- `vector_search(query, collection, top_k, db_path)` embeds the query, then `await table.search(vec)` → `.limit(top_k).to_list()`, returning the chunk texts, `_distance` scores (L2, LanceDB default), and `seq` positions. `list_collections(db_path)` returns the table names so the Planner knows which files exist ([tools.py](src/vectordb/tools.py)).
+- **Neighbor stitching** — vector search returns the most *similar* chunks, but a contiguous block (table of contents, reference list) splits across chunks where only the head ranks high; the tail falls below `top_k` and the answer truncates. After KNN, `gather_neighbors` expands each hit to its contiguous `seq`-neighborhood (`[seq-EXPAND_PADDING, seq+EXPAND_PADDING]`, merging windows whose gap ≤ `BRIDGE_GAP`, fetched by `seq` filter-scan, capped at `MAX_EXPANDED`) so whole blocks come back. Deterministic, no LLM. Tables indexed before the `seq` column no-op until reindexed.
 - Search is exhaustive (no ANN index is built) — fine at document scale; add `table.create_index()` if a corpus grows large.
 
 ### Reindexing & persistence
@@ -157,12 +161,40 @@ Everything lives under `data/` (created automatically). The CLI's global DB is j
 
 ## Configuration
 
-Copy settings from VSCode user settings or set in `.env`:
+All settings are **pydantic-settings** classes — typed, validated, loaded from `.env` (or the process environment). Env var names are the UPPERCASE field names. Every value has a default, so **only `DEEPSEEK_API_KEY` is strictly required**; bad values are rejected at startup (e.g. `SEARCH_TOP_K=0` fails the `≥1` check).
 
-```
-DEEPSEEK_API_KEY=sk-...
+There are two scopes:
+
+- **`general_settings`** ([src/config.py](src/config.py)) — DeepSeek API + the agent loop.
+- **`vdb_settings`** ([src/vectordb/config.py](src/vectordb/config.py)) — the vectordb package owns its own knobs (path, embeddings, chunking, search, stitching).
+
+```ini
+# ── DeepSeek API (general_settings) ──
+DEEPSEEK_API_KEY=sk-...                      # required
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat
-LANCE_DB_PATH=./data/lancedb/_cli
-MAX_ITERATIONS=3
+
+# ── Agent loop (general_settings) ──
+MAX_ITERATIONS=3                             # max search→check retries before give_up
+
+# ── Vector DB (vdb_settings) ──
+LANCE_DB_PATH=./data/lancedb/_cli            # CLI/global DB dir (web overrides per project)
+EMBEDDING_MODEL=BAAI/bge-small-en-v1.5       # ⚠ changing it changes the vector dim → full reindex
+CHUNK_SIZE=1000                              # chunk target, chars (new docs only)
+CHUNK_OVERLAP=150                            # chunk overlap, chars
+SEARCH_TOP_K=5                               # nearest chunks per (collection, query) before stitching
+
+# ── Neighbor stitching (vdb_settings) ──
+EXPAND_PADDING=2                             # window [seq-P, seq+P] around each hit
+BRIDGE_GAP=1                                 # merge windows when the uncovered gap ≤ this
+MAX_EXPANDED=20                              # cap on stitched chunks per result
 ```
+
+### Tuning the vector DB
+
+- **Retrieval recall vs. noise** — raise `SEARCH_TOP_K` to pull more candidate chunks per query (better recall, more context/noise), lower it to stay tight.
+- **Whole-block retrieval** — if answers to "list the whole X" (table of contents, references) still truncate, raise `EXPAND_PADDING` (reach further from each hit) or `BRIDGE_GAP` (tolerate larger holes between relevant regions). The effective hit-merge distance is `2*EXPAND_PADDING + BRIDGE_GAP + 1`. `MAX_EXPANDED` caps how much a single result can grow.
+- **Chunk granularity** — larger `CHUNK_SIZE` packs more context per chunk (fewer, coarser chunks → better for whole-section reads, worse precision); smaller is the opposite. `CHUNK_OVERLAP` carries context across boundaries. Changing either only affects **newly indexed** documents — reindex to apply.
+- **Embedding model** — `EMBEDDING_MODEL` is a footgun: a different model means a different vector dimension, so existing tables become incompatible. **Reindex every project after changing it.**
+
+> Changes to chunking/embedding settings require a **reindex** to take effect (web: *Edit files → Done & reindex*; CLI: re-run the indexer). Search/stitching settings (`SEARCH_TOP_K`, `EXPAND_PADDING`, `BRIDGE_GAP`, `MAX_EXPANDED`) apply immediately on the next query — no reindex needed.
