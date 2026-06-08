@@ -88,10 +88,17 @@ async def search_fanout_node(
     total_chunks = sum(len(r.get("chunks", [])) for r in results)
     collections_searched = sorted({c for c, _ in resolved})
 
+    # Per-pair "source ← query (N chunks)" for the UI's middle line.
+    found_by = {(r.get("collection"), r.get("subquery")): len(r.get("chunks", [])) for r in results}
+    search_info = "\n".join(
+        f"{c} ← «{q}»  ({found_by.get((c, q), 0)} chunks)" for c, q in resolved
+    )
+
     trace_entry = make_trace_entry(
         agent="search_fanout",
         decision=f"searched {len(resolved)} (collection, query) pairs",
         detail=f"collections={collections_searched}, found_chunks={total_chunks}",
+        info=search_info,
     )
 
     return Command(

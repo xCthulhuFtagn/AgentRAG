@@ -105,6 +105,10 @@ async def sufficient_context_node(
         SufficientContextResult
     ).ainvoke(prompt)
 
+    judge_info = f"reason: {result.reason}"
+    if result.feedback and result.feedback.strip():
+        judge_info += f"\nfeedback: {result.feedback}"
+
     trace_entry = make_trace_entry(
         agent="sufficient_context",
         decision=f"sufficient={result.sufficient}",
@@ -113,6 +117,7 @@ async def sufficient_context_node(
             f"feedback={result.feedback[:100]}, "
             f"missing={result.missing_parts}"
         ),
+        info=judge_info,
     )
 
     # ── Outcome 1: context is sufficient → normal answer ──

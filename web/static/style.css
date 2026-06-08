@@ -83,7 +83,7 @@ body,
   font-size: 1rem;
 }
 
-/* Agent trace step chips — two lines: decision + token cost */
+/* Agent trace step chips — up to three lines: decision + info + token cost */
 .trace-step {
   font-family: ui-monospace, monospace;
   font-size: 0.9rem;
@@ -93,6 +93,14 @@ body,
   padding: 3px 9px;
   margin: 2px 0;
   border-radius: 4px;
+}
+/* Middle line: per-step human-facing context (rationale / source+query / reason) */
+.trace-step-info {
+  font-size: 0.82rem;
+  color: #334155;                /* slate-700 — readable, the meaningful line */
+  margin-top: 2px;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .trace-step-tok {
   font-size: 0.78rem;

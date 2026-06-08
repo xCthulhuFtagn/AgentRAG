@@ -180,6 +180,12 @@ def make_initial_state(
     )
 
 
-def make_trace_entry(agent: str, decision: str, detail: str = "") -> dict:
-    """Create a trace entry dict (appended to trace via operator.add reducer)."""
-    return {"agent": agent, "decision": decision, "detail": detail}
+def make_trace_entry(agent: str, decision: str, detail: str = "", info: str = "") -> dict:
+    """Create a trace entry dict (appended to trace via operator.add reducer).
+
+    `info` is optional human-facing context shown as the middle line of a step in
+    the web UI (Planner rationale, searched source+query, judge reason/feedback);
+    `detail` stays the compact log-line string. Newlines in `info` render as
+    separate lines in the UI.
+    """
+    return {"agent": agent, "decision": decision, "detail": detail, "info": info}

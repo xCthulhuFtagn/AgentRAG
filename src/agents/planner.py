@@ -113,10 +113,14 @@ async def planner_node(
     steps_dicts = [s.model_dump() for s in plan.steps]
 
     mode = "iteration" if is_iteration else "initial"
+    rationale_info = "\n".join(
+        f"• {s.get('collection', '?')}: {s.get('rationale', '')}" for s in steps_dicts
+    )
     trace_entry = make_trace_entry(
         agent="planner",
         decision=f"{mode}: {len(plan.steps)} route(s)",
         detail=str(steps_dicts),
+        info=rationale_info,
     )
 
     if not plan.steps:

@@ -261,9 +261,16 @@ def index():
                         if (ti or to)
                         else "tokens · —"
                     )
+                    info = str(t.get("info", "")).strip()
+                    info_html = (
+                        f"<div class='trace-step-info'>{html.escape(info).replace(chr(10), '<br>')}</div>"
+                        if info
+                        else ""
+                    )
                     ui.html(
                         "<div class='trace-step'>"
                         f"<div class='trace-step-main'>🔵 {agent}: {decision}</div>"
+                        f"{info_html}"
                         f"<div class='trace-step-tok'>{tok_line}</div>"
                         "</div>"
                     )
