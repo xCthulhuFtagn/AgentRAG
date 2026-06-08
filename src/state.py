@@ -72,17 +72,6 @@ class PlanResult(BaseModel):
     _coerce_steps = field_validator("steps", mode="before")(_coerce_list)
 
 
-class OrchestratorResult(BaseModel):
-    """Orchestrator output: complexity assessment.
-
-    Schema-Guided Reasoning: the reasoning is generated BEFORE the is_complex
-    verdict, so the boolean follows the analysis instead of being decided up
-    front and rationalized afterward.
-    """
-    reasoning: str = Field(description="Analysis FIRST: does the query need multi-agent decomposition (multi-hop, multiple sources, planning) or can it be answered directly from one search?")
-    is_complex: bool = Field(description="VERDICT, after the reasoning above: True if the query needs the multi-agent pipeline, False if a direct answer suffices.")
-
-
 class SufficientContextResult(BaseModel):
     """Sufficient Context Agent output.
 
@@ -146,10 +135,6 @@ class AgentRAGState(TypedDict):
     # Input
     query: str
 
-    # Orchestrator
-    is_complex: Optional[bool]
-    orchestrator_reasoning: str
-
     # Vector DB scope — which LanceDB to search (per-project isolation).
     # None → global LANCE_DB_PATH (CLI default).
     db_path: Optional[str]
@@ -161,8 +146,8 @@ class AgentRAGState(TypedDict):
 
     # Query Rewriter
     rewritten_queries: Annotated[list[str], operator.add]
-    # Current-turn search tasks: [{"collection": str|None, "query": str}].
-    # Overwritten each turn (no reducer) — collection=None means "search all".
+    # Current-turn search tasks: [{"collection": str, "query": str}], one per
+    # planner route. Overwritten each turn (no reducer).
     search_tasks: list[dict]
 
     # Search Fanout
@@ -203,8 +188,6 @@ def make_initial_state(
     return AgentRAGState(
         query=query,
         db_path=db_path,
-        is_complex=None,
-        orchestrator_reasoning="",
         plan_steps=[],
         current_route=None,
         rewritten_queries=[],

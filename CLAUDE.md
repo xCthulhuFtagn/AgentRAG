@@ -6,17 +6,20 @@ Agentic RAG — multi-agent retrieval pipeline on LangGraph + DeepSeek + LanceDB
 
 **Fully edgeless LangGraph graph.** All routing via `Command(goto=...)` returned from nodes. No `add_edge`, no `add_conditional_edges`, no `Send`.
 
-Entry: `set_entry_point("orchestrator")`
+Entry: `set_entry_point("planner")`
 Exit: `Command(goto=END)` in synthesis or give_up nodes.
+
+**Pure RAG — single functionality.** Every query goes through retrieval. There is
+no orchestrator / complexity gate (no "answer directly without searching") and no
+fallbacks: no broad search-all, no general-knowledge answer. If nothing in the
+corpus is relevant, the system refuses honestly via `give_up`.
 
 ## Graph flow
 
 ```
-orchestrator ──simple──► synthesis ──► END
-     │ complex
-     ▼
   planner → query_rewriter → search_fanout → sufficient_context
-     ▲                                           │
+     ▲   │                                       │
+     │   └─ no relevant collection ──► give_up ──► END
      │       insufficient + iters left           │
      └───────────────────────────────────────────┘
      (re-route: planner re-plans for the missing piece)
@@ -25,23 +28,22 @@ orchestrator ──simple──► synthesis ──► END
                        insufficient + max iters ──► give_up ──► END
 ```
 
-The loop re-enters at **planner**, not query_rewriter — on iteration the Planner
-re-routes to the collection(s) most likely to hold the missing piece (mirrors
-Google RAG Engine's loop that re-enters before its Search Plan agent). Only if
-the Planner finds no relevant route does it fall through to query_rewriter's
-broad fallback (search all collections, `collection=None`).
+The loop re-enters at **planner** — on iteration the Planner re-routes to the
+collection(s) most likely to hold the missing piece (mirrors Google RAG Engine's
+loop that re-enters before its Search Plan agent). If the Planner finds no
+relevant route — on the initial turn or on iteration — it goes straight to
+`give_up` (no broad fallback).
 
-## Nodes (7 total)
+## Nodes (6 total)
 
 | # | Node | Returns |
 |---|------|---------|
-| 1 | orchestrator | `Command(goto="synthesis" \| "planner")` |
-| 2 | planner | `Command(goto="query_rewriter" \| "synthesis")` — `"query_rewriter"` also when iterating with no route (broad fallback); `"synthesis"` only on the initial turn with no route |
-| 3 | query_rewriter | `Command(goto="search_fanout")` |
-| 4 | search_fanout | `Command(goto="sufficient_context")` |
-| 5 | sufficient_context | `Command(goto="synthesis" \| "planner" \| "give_up")` — `"planner"` re-routes for the missing piece |
-| 6 | synthesis | `Command(goto=END)` |
-| 7 | give_up | `Command(goto=END)` — system refusal, no LLM |
+| 1 | planner | `Command(goto="query_rewriter" \| "give_up")` — `"give_up"` whenever no collection is relevant (initial turn **or** iteration) |
+| 2 | query_rewriter | `Command(goto="search_fanout")` — always rewrites the Planner's routes (one task per route) |
+| 3 | search_fanout | `Command(goto="sufficient_context")` |
+| 4 | sufficient_context | `Command(goto="synthesis" \| "planner" \| "give_up")` — `"planner"` re-routes for the missing piece |
+| 5 | synthesis | `Command(goto=END)` |
+| 6 | give_up | `Command(goto=END)` — system refusal, no LLM |
 
 ## Key design decisions
 
@@ -60,7 +62,7 @@ broad fallback (search all collections, `collection=None`).
 ## State accumulation & DB scope
 
 - `search_results`, `rewritten_queries`, `trace` use `operator.add` reducer — each Command.update appends. Critical for the iteration loop.
-- `search_tasks` (no reducer, overwrite) carries `[{collection, query}]` for the current turn. `collection=None` → search ALL collections (the iteration **fallback**, only when the Planner couldn't re-route to a specific collection).
+- `search_tasks` (no reducer, overwrite) carries `[{collection, query}]` for the current turn — one concrete-collection task per Planner route. No `collection=None` / search-all mode (pure RAG, no broad fallback).
 - `db_path` (set by `make_initial_state(db_path=...)`, default None=global `LANCE_DB_PATH`) scopes every search to one LanceDB → per-project isolation. Threaded into `vector_search`/`list_collections`.
 
 ## Multi-file search
@@ -132,7 +134,7 @@ Sufficient Context Agent returns:
 - Insufficient + iters left → `Command(goto="planner")` with `feedback`, `missing_parts` (re-route)
 - Insufficient + max iters → `Command(goto="give_up")` (system refusal, no LLM)
 
-**Re-routing on iteration.** The loop re-enters at the **Planner**: with `feedback` + `iteration_count > 0` set, `planner` uses `PLANNER_ITERATION_PROMPT` to re-route to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to `query_rewriter` as usual. If the Planner finds no relevant route, it goes to `query_rewriter`, which falls back to a single targeted query across ALL collections (`collection=None`). `query_rewriter` thus has two modes: rewrite the Planner's routes (initial turn **and** re-routed iterations), or the broad fallback (iteration with empty `plan_steps`). Max iterations: 3.
+**Re-routing on iteration.** The loop re-enters at the **Planner**: with `feedback` + `iteration_count > 0` set, `planner` uses `PLANNER_ITERATION_PROMPT` to re-route to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to `query_rewriter`. If the Planner finds no relevant route — initial turn or iteration — it goes straight to `give_up` (pure RAG: no broad fallback). `query_rewriter` therefore has a single mode: rewrite the Planner's routes, one search task per route. Max iterations: 3.
 
 ## Running
 

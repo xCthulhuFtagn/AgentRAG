@@ -28,21 +28,6 @@ Guidelines:
 
 Return ONLY the rewritten search query text, nothing else."""
 
-REWRITER_ITERATION_PROMPT = """You are the Query Rewriter Agent of an Agentic RAG system.
-
-This is an ITERATION — previous searches did not find everything needed.
-
-Original user question: {original_query}
-Previous search missed: {missing_parts}
-Feedback from context checker: {feedback}
-Previous queries tried: {previous_queries}
-
-Your job: create a NEW search query that specifically targets the MISSING information.
-Be more specific, use alternative keywords, try a different angle.
-Focus ONLY on what was missed.
-
-Return ONLY the rewritten search query text, nothing else."""
-
 
 async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str]:
     """Rewrite one plan route into a search-optimized query.
@@ -63,60 +48,27 @@ async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str
 async def query_rewriter_node(
     state: AgentRAGState, *, config: RunnableConfig
 ) -> Command:
-    """Query Rewriter: produce search-optimized queries, command search_fanout."""
+    """Query Rewriter: produce search-optimized queries, command search_fanout.
+
+    The Planner guarantees ≥1 route (no relevant collection → give_up), so we
+    always rewrite its plan — one search task per route, no fallback modes.
+    Routes are independent → rewrite them concurrently (asyncio.gather), which
+    preserves order so rewritten[i]/search_tasks[i] align with plan_steps[i].
+    """
     llm = get_llm(temperature=0.3)
-
-    feedback = state.get("feedback", "")
-    rewritten: list[str] = []
-    # search_tasks pairs each query with its target collection.
-    # collection=None means "search across all collections".
-    search_tasks: list[dict] = []
-
     plan_steps = state.get("plan_steps", [])
-    if feedback and state.get("iteration_count", 0) > 0 and not plan_steps:
-        # ── Iteration fallback: planner found no relevant route to re-target ──
-        # On iteration the Planner normally re-routes to the collection holding
-        # the missing piece. Only if it couldn't (empty plan_steps) do we fall
-        # back to a single targeted query across ALL collections (collection=None).
-        prompt = REWRITER_ITERATION_PROMPT.format(
-            original_query=state["query"],
-            missing_parts=", ".join(state.get("missing_parts", [])),
-            feedback=feedback,
-            previous_queries=", ".join(state.get("rewritten_queries", [])[-5:]),
-        )
-        result: str = (await llm.ainvoke(prompt)).content.strip().strip('"')
-        rewritten = [result]
-        search_tasks = [{"collection": None, "query": result}]
-        mode = "iteration"
 
-        trace_entry = make_trace_entry(
-            agent="query_rewriter",
-            decision=mode,
-            detail=f"query='{result}' (all collections)",
-        )
-    else:
-        # ── Rewrite ALL plan routes, one task per route ──
-        # Reached on the initial turn and on iterations where the Planner
-        # re-routed (plan_steps populated) to target the missing piece.
-        if not plan_steps:
-            rewritten = [state["query"]]  # fallback: use original query
-            search_tasks = [{"collection": None, "query": state["query"]}]
-        else:
-            # Routes are independent → rewrite them concurrently (asyncio.gather)
-            # instead of one LLM call after another. gather preserves order, so
-            # rewritten[i]/search_tasks[i] still align with plan_steps[i].
-            pairs = await asyncio.gather(
-                *[_rewrite_route(llm, state["query"], s) for s in plan_steps]
-            )
-            rewritten = [q for _, q in pairs]
-            search_tasks = [{"collection": c, "query": q} for c, q in pairs]
-        mode = "initial"
+    pairs = await asyncio.gather(
+        *[_rewrite_route(llm, state["query"], s) for s in plan_steps]
+    )
+    rewritten = [q for _, q in pairs]
+    search_tasks = [{"collection": c, "query": q} for c, q in pairs]
 
-        trace_entry = make_trace_entry(
-            agent="query_rewriter",
-            decision=f"{mode} ({len(rewritten)} queries)",
-            detail=str(search_tasks),
-        )
+    trace_entry = make_trace_entry(
+        agent="query_rewriter",
+        decision=f"{len(rewritten)} queries",
+        detail=str(search_tasks),
+    )
 
     return Command(
         goto="search_fanout",

@@ -1,6 +1,8 @@
 """Planner Agent — breaks down query into search routes.
 
-Always returns Command(goto="query_rewriter") or Command(goto="synthesis").
+Returns Command(goto="query_rewriter") when it found relevant collections, or
+Command(goto="give_up") when no indexed collection is relevant (pure RAG: no
+fallback to a broad search or to a general-knowledge answer).
 No Send — all routes processed together in query_rewriter.
 """
 
@@ -31,7 +33,8 @@ User query: {query}
 
 If the query needs information from multiple collections, create multiple steps.
 If the query can be answered from a single collection, create one step.
-If no relevant collection exists, return an empty steps list."""
+If no collection is relevant to the query, return an empty steps list — the
+system will then honestly report it has nothing to answer from."""
 
 PLANNER_ITERATION_PROMPT = """You are the Planner Agent of an Agentic RAG system.
 
@@ -56,7 +59,8 @@ For each collection that could plausibly contain a missing piece, create a Route
 Strongly PREFER collections that have NOT been searched yet — re-routing to an
 already-searched collection only makes sense with a genuinely different subquery.
 Prefer the 1-3 most relevant collections. If no collection looks relevant,
-return an empty steps list — the system will then broaden the search to all."""
+return an empty steps list — the system will then honestly report it could not
+find the missing piece."""
 
 
 async def planner_node(
@@ -127,13 +131,17 @@ async def planner_node(
     )
 
     if not plan.steps:
-        # No relevant route. On iteration, hand off to query_rewriter so it can
-        # broaden the search to all collections (the safety net). On the initial
-        # turn, there's nothing to search → synthesize from what we have.
+        # Pure RAG: no relevant collection means the knowledge base cannot answer
+        # this query. No fallback (no broad search-all, no general-knowledge
+        # answer) — hand to give_up for an honest refusal, reporting whatever was
+        # found in earlier iterations.
         return Command(
-            goto="query_rewriter" if is_iteration else "synthesis",
+            goto="give_up",
             update={
                 "plan_steps": [],
+                "sufficient_reason": (
+                    "The planner found no indexed collection relevant to this query."
+                ),
                 "trace": [trace_entry],
             },
         )

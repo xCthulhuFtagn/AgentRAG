@@ -8,23 +8,25 @@ Implementation of Google Research's [Agentic RAG](https://research.google/blog/u
 
 Fully edgeless LangGraph graph — zero `add_edge` calls, all routing via `Command(goto=...)`.
 
+**Pure RAG — single functionality.** Every query goes through retrieval: no
+orchestrator / complexity gate (no answering without searching) and no fallbacks
+(no broad search-all, no general-knowledge answer). If nothing in the corpus is
+relevant, the system refuses honestly via Give Up.
+
 ```
-orchestrator ◀── entry_point
-  │
-  ├─ Command(goto="synthesis")          ← simple query
-  └─ Command(goto="planner")            ← complex query
-        │
-        ▼
-      planner ◄──────────────────────────────────┐
-        │ Command(goto="query_rewriter")          │
-        ▼                                        │
-      query_rewriter                             │
-        │ Command(goto="search_fanout")          │
-        ▼                                        │
-      search_fanout                              │
-        │ Command(goto="sufficient_context")     │
-        ▼                                        │
-      sufficient_context ────────────────────────┘
+      planner ◄── entry_point ◄────────────────────┐
+        │                                          │
+        ├─ no relevant collection:                 │
+        │    Command(goto="give_up") → END          │
+        │ Command(goto="query_rewriter")            │
+        ▼                                          │
+      query_rewriter                               │
+        │ Command(goto="search_fanout")            │
+        ▼                                          │
+      search_fanout                                │
+        │ Command(goto="sufficient_context")       │
+        ▼                                          │
+      sufficient_context ──────────────────────────┘
         │
         ├─ insufficient + iters left:
         │    Command(goto="planner")  ← re-route to the collection
@@ -39,16 +41,15 @@ orchestrator ◀── entry_point
 On iteration the loop re-enters at the **Planner**, which re-routes to the
 collection(s) most likely to hold the missing piece (mirrors Google RAG
 Engine's loop that re-enters before its Search Plan agent). If the Planner
-finds no relevant route, it falls through to the Query Rewriter's broad
-fallback — a single targeted query across all collections.
+finds no relevant route — initial turn or iteration — it goes straight to
+**Give Up** (no broad fallback).
 
-### 7 agents
+### 6 agents
 
 | Agent | Role |
 |-------|------|
-| **Orchestrator** | Assesses query complexity; simple → synthesis, complex → planner |
-| **Planner** | Breaks query into search routes: `[(collection, subquery), ...]` |
-| **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); broad-fallback single query on iteration when the Planner found no route |
+| **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; no relevant collection → Give Up |
+| **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); one search task per route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
 | **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step; also gets the full corpus inventory (ground truth) so it can confirm completeness on "describe all files" queries |
 | **Synthesis** | Generates final answer with source citations; can describe every document from the inventory + retrieved chunks |
@@ -90,16 +91,15 @@ A Python-only UI: **projects on the left, chat on the right**.
 - Create / rename / delete / open projects (green theme).
 - Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & reindex** applies everything at once (one reindex); **Cancel** discards.
 - That single reindex **freezes** the chat (turns blue, trembles, snows ❄) until it finishes — sending is blocked, but you can still open/return to the frozen chat to watch it. The freeze tracks the project's reindex status live, so switching chats and back keeps it correct.
-- Chat streams the **live agent trace** (orchestrator → planner → search → sufficient) then the final answer.
+- Chat streams the **live agent trace** (planner → rewrite → search → sufficient) then the final answer.
 - Projects are **isolated** — each has its own LanceDB, so search never leaks across projects.
 
 ## Project structure
 
 ```
 src/                      # RAG engine (graph + vectordb), unchanged by the UI
-├── agents/               # 7 agents + common LLM factory (get_structured_llm)
-│   ├── orchestrator.py   #   Command(goto="synthesis" | "planner")
-│   ├── planner.py        #   Command(goto="query_rewriter" | "synthesis") — re-routes on iteration
+├── agents/               # 6 agents + common LLM factory (get_structured_llm)
+│   ├── planner.py        #   Command(goto="query_rewriter" | "give_up") — re-routes on iteration
 │   ├── query_rewriter.py #   Command(goto="search_fanout") — one search_task per route (gather)
 │   ├── search_fanout.py  #   Command(goto="sufficient_context") — all (collection,query) pairs
 │   ├── sufficient_context.py  # Command(goto="synthesis" | "planner" | "give_up")

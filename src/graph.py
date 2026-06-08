@@ -10,7 +10,6 @@ from langgraph.checkpoint.memory import MemorySaver
 
 from src.state import AgentRAGState
 from src.agents.common import logged_node, llm_failsafe
-from src.agents.orchestrator import orchestrator_node
 from src.agents.planner import planner_node
 from src.agents.query_rewriter import query_rewriter_node
 from src.agents.search_fanout import search_fanout_node
@@ -23,46 +22,38 @@ def build_graph() -> StateGraph:
     """Build the edgeless Agentic RAG graph.
 
     Every node returns Command(goto=...). Zero edges. Pure Command-driven flow.
+    Pure RAG: every query goes through retrieval — no orchestrator/complexity
+    gate, no fallbacks (no broad search-all, no general-knowledge answer).
 
-        orchestrator ◀── entry_point
-          │
-          ├⟶ Command(goto="synthesis")
-          │
-          └⟶ Command(goto="planner")
-                │
-                ▼
-              planner ◄───────────────────────────┐
-                │                                  │
-                └⟶ Command(goto="query_rewriter")   │
-                      │  (or "synthesis" if no route)│
-                      ▼                             │
-                  query_rewriter                    │
-                      │                             │
-                      └⟶ Command(goto="search")      │
-                            │                        │
-                            ▼                        │
-                        search_fanout                │
-                            │                        │
-                            └⟶ Command(goto=         │
-                                "sufficient")        │
-                                  │                  │
-                                  ▼                  │
-                          sufficient_context ────────┘
-                            │        insufficient + iters left:
-                            │        Command(goto="planner") — re-route to the
-                            │        collection holding the missing piece
-                            │
-                            ├⟶ sufficient:
-                            │  Command(goto="synthesis")
-                            │     │
-                            │     ▼
-                            │  synthesis → Command(goto=END)
-                            │
-                            └⟶ insufficient + max iters:
-                               Command(goto="give_up")
-                                  │
-                                  ▼
-                               give_up → Command(goto=END)
+        planner ◄── entry_point ◄───────────────┐
+          │                                      │
+          ├⟶ no relevant collection:             │
+          │  Command(goto="give_up")             │
+          │                                      │
+          └⟶ Command(goto="query_rewriter")       │
+                │                                 │
+                ▼                                 │
+            query_rewriter                        │
+                │                                 │
+                └⟶ Command(goto="search_fanout")   │
+                      │                            │
+                      ▼                            │
+                  search_fanout                    │
+                      │                            │
+                      └⟶ Command(goto=             │
+                          "sufficient_context")    │
+                            │                      │
+                            ▼                      │
+                    sufficient_context ────────────┘
+                      │        insufficient + iters left:
+                      │        Command(goto="planner") — re-route to the
+                      │        collection holding the missing piece
+                      │
+                      ├⟶ sufficient:
+                      │  Command(goto="synthesis") → Command(goto=END)
+                      │
+                      └⟶ insufficient + max iters:
+                         Command(goto="give_up") → Command(goto=END)
     """
     workflow = StateGraph(AgentRAGState)
 
@@ -73,7 +64,6 @@ def build_graph() -> StateGraph:
     # not redirect to itself. Order: logged_node outside, so a node's tokens
     # spent before failing are still metered onto the give_up redirect entry.
     nodes = {
-        "orchestrator": orchestrator_node,
         "planner": planner_node,
         "query_rewriter": query_rewriter_node,
         "search_fanout": search_fanout_node,
@@ -85,6 +75,6 @@ def build_graph() -> StateGraph:
         guarded = node if name == "give_up" else llm_failsafe(name)(node)
         workflow.add_node(name, logged_node(guarded))
 
-    workflow.set_entry_point("orchestrator")
+    workflow.set_entry_point("planner")
 
     return workflow.compile(checkpointer=MemorySaver())

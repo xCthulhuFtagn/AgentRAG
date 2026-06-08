@@ -3,9 +3,8 @@
 Returns Command(goto="sufficient_context") — edgeless routing.
 Parallelism via asyncio.gather for tool calls.
 
-Reads state["search_tasks"] = [{"collection": str|None, "query": str}].
-collection=None means search the query across ALL collections in the project DB
-(used during iteration, when we don't know which file holds the missing piece).
+Reads state["search_tasks"] = [{"collection": str, "query": str}], one concrete
+(collection, query) pair per planner route — no search-all mode.
 """
 
 import asyncio
@@ -15,7 +14,7 @@ from langgraph.types import Command
 
 from src.state import AgentRAGState, make_trace_entry
 from src.vectordb.config import vdb_settings
-from src.vectordb.tools import vector_search, list_collections, gather_neighbors
+from src.vectordb.tools import vector_search, gather_neighbors
 
 
 async def search_fanout_node(
@@ -24,24 +23,13 @@ async def search_fanout_node(
     """Search Fanout: execute vector searches, command sufficient_context."""
     db_path = state.get("db_path")
 
-    tasks = state.get("search_tasks") or []
-    if not tasks:
-        # Fallback: search the original query across all collections.
-        tasks = [{"collection": None, "query": state["query"]}]
-
-    # Resolve collection=None into concrete collections (search everywhere).
-    all_collections: list[str] | None = None
-    resolved: list[tuple[str, str]] = []  # (collection, query)
-    for t in tasks:
-        query = t.get("query", "")
-        collection = t.get("collection")
-        if collection is None:
-            if all_collections is None:
-                all_collections = await list_collections.ainvoke({"db_path": db_path})
-            for col in all_collections:
-                resolved.append((col, query))
-        else:
-            resolved.append((collection, query))
+    # Each task targets one concrete collection (query_rewriter built them from
+    # the planner's routes); search every (collection, query) pair in parallel.
+    resolved: list[tuple[str, str]] = [
+        (t["collection"], t.get("query", ""))
+        for t in state.get("search_tasks") or []
+        if t.get("collection")
+    ]
 
     async def search_one(collection: str, query: str) -> dict:
         try:

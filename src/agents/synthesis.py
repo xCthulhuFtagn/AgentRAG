@@ -57,16 +57,10 @@ async def synthesis_node(
         )
 
     if not results_str:
-        results_str = (
-            "(No context retrieved — answer based on your knowledge, "
-            "but clearly state this)"
-        )
+        results_str = "(No context retrieved)"
 
-    context_note = (
-        "Context is sufficient — answer fully."
-        if state.get("sufficient")
-        else "Context may be incomplete — answer what you can, note gaps."
-    )
+    # Synthesis is only reached after the judge ruled the context sufficient.
+    context_note = "Context is sufficient — answer fully from it."
 
     inventory = await get_inventory_str(state.get("db_path"))
 
