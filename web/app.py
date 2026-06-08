@@ -112,6 +112,30 @@ def index():
                     _project_card(p)
 
     @ui.refreshable
+    def staged_files_list():
+        # Separate refreshable so on_upload can redraw the list WITHOUT rebuilding
+        # the ui.upload widget above it — rebuilding it mid-transfer tears down the
+        # connections of other in-flight files (ClientDisconnect → silently lost).
+        visible = [s for s in ctx["edit"]["files"] if not s["deleted"]]
+        with ui.scroll_area().classes("w-full").style("height: 150px"):
+            with ui.column().classes("w-full gap-1"):
+                if not visible:
+                    ui.label("No files").classes("text-gray-400 text-sm")
+                for s in visible:
+                    tag = " (new)" if s["origin"] == "new" else ""
+                    with ui.row().classes("w-full items-center no-wrap"):
+                        ui.icon("description").classes("text-green-600")
+                        ui.label(f"{s['name']}{tag}").classes("grow text-sm")
+                        ui.button(
+                            icon="edit",
+                            on_click=lambda _=None, x=s: stage_rename_dialog(x),
+                        ).props("flat dense round")
+                        ui.button(
+                            icon="delete",
+                            on_click=lambda _=None, x=s: stage_delete(x),
+                        ).props("flat dense round color=red")
+
+    @ui.refreshable
     def files_panel():
         pid = ctx["open_pid"]
         if not pid:
@@ -151,24 +175,7 @@ def index():
             multiple=True,
         ).props(f'accept="{ACCEPT}"').classes("w-full")
 
-        visible = [s for s in ctx["edit"]["files"] if not s["deleted"]]
-        with ui.scroll_area().classes("w-full").style("height: 150px"):
-            with ui.column().classes("w-full gap-1"):
-                if not visible:
-                    ui.label("No files").classes("text-gray-400 text-sm")
-                for s in visible:
-                    tag = " (new)" if s["origin"] == "new" else ""
-                    with ui.row().classes("w-full items-center no-wrap"):
-                        ui.icon("description").classes("text-green-600")
-                        ui.label(f"{s['name']}{tag}").classes("grow text-sm")
-                        ui.button(
-                            icon="edit",
-                            on_click=lambda _=None, x=s: stage_rename_dialog(x),
-                        ).props("flat dense round")
-                        ui.button(
-                            icon="delete",
-                            on_click=lambda _=None, x=s: stage_delete(x),
-                        ).props("flat dense round color=red")
+        staged_files_list()
 
         with ui.row().classes("w-full no-wrap gap-2"):
             ui.button("Cancel", on_click=lambda _=None: cancel_edit()).props("flat")
@@ -374,7 +381,9 @@ def index():
             {"name": name, "origin": "new", "orig_name": None,
              "content": content, "deleted": False}
         )
-        files_panel.refresh()
+        # Refresh only the list — NOT files_panel — so the ui.upload widget
+        # survives and other files in this batch keep transferring.
+        staged_files_list.refresh()
 
     async def stage_rename_dialog(entry):
         with ui.dialog() as dialog, ui.card():
@@ -396,14 +405,14 @@ def index():
             ui.notify(f"A file named '{new_name}' already exists", color="negative")
             return
         entry["name"] = new_name
-        files_panel.refresh()
+        staged_files_list.refresh()
 
     def stage_delete(entry):
         if entry["origin"] == "new":
             ctx["edit"]["files"].remove(entry)  # nothing on disk yet
         else:
             entry["deleted"] = True             # tombstone — removed on commit
-        files_panel.refresh()
+        staged_files_list.refresh()
 
     async def commit_edit():
         pid = ctx["edit"]["pid"]
