@@ -42,6 +42,9 @@ class VectorDBSettings(BaseSettings):
     # routes using those summaries. When False, no summary is generated and the
     # Planner sees only table names (no LLM cost at index time).
     descriptions_enabled: bool = True
+    # How many leading chars of a file are sent to the LLM for its description.
+    # Title/abstract/intro carry most of the routing signal; this bounds cost.
+    describe_max_chars: int = Field(default=6000, ge=1)
 
     # ── Search ───────────────────────────────────────────────────────────────
     # Nearest chunks per (collection, query) before stitching.

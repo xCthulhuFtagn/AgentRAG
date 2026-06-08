@@ -103,6 +103,7 @@ Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, 
 | `CHUNK_SIZE` | `1000` | chunk target (chars); new docs only |
 | `CHUNK_OVERLAP` | `150` | chunk overlap (chars) |
 | `DESCRIPTIONS_ENABLED` | `true` | generate LLM file summaries at index time + Planner routes with them |
+| `DESCRIBE_MAX_CHARS` | `6000` | leading chars of each file sent to the LLM for its description |
 | `SEARCH_TOP_K` | `5` | nearest chunks per (collection, query) before stitching |
 | `EXPAND_PADDING` | `1` | neighbor stitching: window `[seq-P, seq+P]` per hit |
 | `BRIDGE_GAP` | `2` | merge windows when uncovered gap ≤ this |

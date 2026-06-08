@@ -14,6 +14,7 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 
 from src.config import general_settings
+from src.vectordb.config import vdb_settings
 
 DESCRIBE_PROMPT = """You summarize a document so a retrieval planner can decide whether to search it for a given query.
 
@@ -36,13 +37,16 @@ def _describe_llm() -> ChatOpenAI:
     )
 
 
-async def describe_document(text: str, max_chars: int = 6000) -> str:
+async def describe_document(text: str, max_chars: int | None = None) -> str:
     """Return a short content description for routing. Empty string on failure.
 
     Only the first `max_chars` are sent — title/abstract/intro carry most of
-    the routing signal and this bounds cost. A failure must never break
-    indexing, so any error degrades to an empty description.
+    the routing signal and this bounds cost. Defaults to
+    `vdb_settings.describe_max_chars` (env DESCRIBE_MAX_CHARS). A failure must
+    never break indexing, so any error degrades to an empty description.
     """
+    if max_chars is None:
+        max_chars = vdb_settings.describe_max_chars
     excerpt = text[:max_chars].strip()
     if not excerpt:
         return ""
