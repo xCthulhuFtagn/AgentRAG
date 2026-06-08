@@ -10,7 +10,9 @@ Env var names are the UPPERCASE field names (matching is case-insensitive),
 e.g. SEARCH_TOP_K, EXPAND_PADDING.
 """
 
-from pydantic import Field
+from typing import Optional
+
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -47,6 +49,30 @@ class VectorDBSettings(BaseSettings):
     # How many leading chars of a file are sent to the LLM for its description.
     # Title/abstract/intro carry most of the routing signal; this bounds cost.
     describe_max_chars: int = Field(default=6000, ge=1)
+
+    # ── OCR (LiteParse) ──────────────────────────────────────────────────────
+    # By default LiteParse OCRs scanned/image content with its built-in Tesseract,
+    # which is noisy on tiny embedded images ("Image too small to scale!!") and
+    # weaker on Cyrillic. Point ocr_server_url at a LOCAL OCR sidecar to delegate
+    # OCR there — better multilingual accuracy, no native warnings, fully offline
+    # (heavy torch/paddle deps live in the sidecar's own venv, not this project).
+    # Run one from the liteparse repo's ocr/ dir via `uv run server.py`:
+    #   EasyOCR   → http://localhost:8828/ocr
+    #   PaddleOCR → http://localhost:8829/ocr
+    # ocr_language forwards the language code (e.g. "ru") to that server.
+    # Both unset → LiteParse's built-in Tesseract (current behavior).
+    ocr_server_url: Optional[str] = None
+    ocr_language: Optional[str] = None
+
+    @field_validator("ocr_server_url", "ocr_language", mode="before")
+    @classmethod
+    def _blank_to_none(cls, v):
+        # Unspecified address (unset, or set-but-empty `OCR_SERVER_URL=` in .env)
+        # → None → LiteParse uses its built-in Tesseract. So OCR works by default
+        # without requiring an external sidecar.
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
 
     # ── Search ───────────────────────────────────────────────────────────────
     # Nearest chunks per (collection, query) before stitching.

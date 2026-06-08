@@ -2,6 +2,8 @@
 
 Text extraction is hybrid:
 - Rich documents (PDF/DOCX/PPTX) → LiteParse (Rust, in-process, OCR-capable).
+  OCR uses built-in Tesseract by default; set OCR_SERVER_URL to delegate to a
+  local EasyOCR/PaddleOCR sidecar (better Cyrillic, no Tesseract noise).
 - Plain text (TXT/MD) → direct read (no parser needed).
 
 Usage:
@@ -75,8 +77,18 @@ def safe_table_name(stem: str) -> str:
 
 @lru_cache(maxsize=1)
 def _get_parser() -> LiteParse:
-    """Cached LiteParse instance (spawns OCR workers lazily)."""
-    return LiteParse(quiet=True)
+    """Cached LiteParse instance (spawns OCR workers lazily).
+
+    When `OCR_SERVER_URL` is set, OCR is delegated to a local HTTP OCR sidecar
+    (EasyOCR/PaddleOCR) instead of the built-in Tesseract — better Cyrillic and
+    no 'Image too small to scale!!' native noise. Unset → built-in Tesseract.
+    Passing None for either arg is a no-op (LiteParse keeps its defaults).
+    """
+    return LiteParse(
+        quiet=True,
+        ocr_server_url=vdb_settings.ocr_server_url,
+        ocr_language=vdb_settings.ocr_language,
+    )
 
 
 def extract_text(file_path: Path) -> str:

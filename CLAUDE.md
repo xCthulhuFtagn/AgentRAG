@@ -78,7 +78,7 @@ relevant route — on the initial turn or on iteration — it goes straight to
 - `describe.py` — `describe_document(text)`: LLM reads an excerpt at index time → a 1–2 sentence content summary. Self-contained (builds its own DeepSeek client from `general_settings`, no `agents` import).
 - `descriptions.py` — JSON sidecar (`{db_path}/_descriptions.json`, `table → {file, description}`) storage; `load_descriptions`/`save_descriptions`. Written at index time, read by the Planner.
 - `tools.py` — `vector_search(query, collection, top_k, db_path)` and `list_collections(db_path)` as LangChain `@tool`s. **Async LanceDB gotcha**: `search()` is a coroutine — `q = await table.search(vec)` then `await q.limit(k).to_list()`. Returns chunk `text` + `_distance` (L2, default metric) + `seq` (chunk position). `gather_neighbors(collection, hit_seqs, …)` does the neighbor stitching (filter-scan by `seq`, no vector).
-- `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `clean_text` (collapse ragged whitespace) → `split_text` (RecursiveCharacterTextSplitter, `CHUNK_SIZE`/`CHUNK_OVERLAP` chars, splits on para→line→sentence→word, never mid-word) → `embed_batch` → rows `{text, vector, seq}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`.
+- `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `clean_text` (collapse ragged whitespace) → `split_text` (RecursiveCharacterTextSplitter, `CHUNK_SIZE`/`CHUNK_OVERLAP` chars, splits on para→line→sentence→word, never mid-word) → `embed_batch` → rows `{text, vector, seq}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`. LiteParse OCRs scanned/image pages with built-in Tesseract by default; set `OCR_SERVER_URL` (+ `OCR_LANGUAGE`) to delegate to a local EasyOCR/PaddleOCR sidecar via `_get_parser()` — better Cyrillic, silences Tesseract's "Image too small to scale!!" native stderr noise.
 
 **Schema & layout:** one **file → one table** (collection); rows are `{text: str, vector: float[384], seq: int}` (`seq` = chunk index in the document, enables neighbor stitching). Table name = sanitized file stem via `safe_table_name()` (LanceDB allows only `[A-Za-z0-9._-]`; Cyrillic transliterated, hash fallback, collisions disambiguated). Per run each table is `drop_table` + `create_table` (no incremental upsert). No ANN index built → exhaustive search (fine at doc scale).
 
@@ -121,6 +121,8 @@ Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, 
 | `DESCRIPTIONS_ENABLED` | `true` | generate LLM file summaries at index time + Planner routes with them |
 | `DESCRIBE_MAX_CHARS` | `6000` | leading chars of each file sent to the LLM for its description |
 | `SEARCH_TOP_K` | `5` | nearest chunks per (collection, query) before stitching |
+| `OCR_SERVER_URL` | _(unset)_ | delegate LiteParse OCR to a local HTTP sidecar (EasyOCR `:8828` / PaddleOCR `:8829`) instead of built-in Tesseract — better Cyrillic, no "image too small" noise, offline. Unset → Tesseract |
+| `OCR_LANGUAGE` | _(unset)_ | language code (e.g. `ru`) forwarded to the OCR sidecar |
 | `EXPAND_PADDING` | `1` | neighbor stitching: window `[seq-P, seq+P]` per hit |
 | `BRIDGE_GAP` | `2` | merge windows when uncovered gap ≤ this |
 | `MAX_EXPANDED` | `16` | cap on stitched chunks per result |

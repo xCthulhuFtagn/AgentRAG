@@ -84,6 +84,27 @@ python -m src.vectordb.indexer --dir docs/sample_docs
 python -m src.main --query "What CPU and RAM does the server for Project Alpha have?"
 ```
 
+### Optional: better OCR for scanned / image documents
+
+By default LiteParse OCRs image content with its built-in **Tesseract**, which is
+weak on Cyrillic and noisy on tiny images (`Image too small to scale!!`). For
+better Russian OCR, run LiteParse's **EasyOCR sidecar** (from the upstream repo)
+and point the app at it:
+
+```bash
+# clone upstream and run the ready-made EasyOCR server (its own deps: torch/opencv)
+git clone https://github.com/run-llama/liteparse
+cd liteparse/ocr/easyocr
+uv run server.py                         # serves EasyOCR on http://localhost:8828
+```
+
+Then in the project's `.env` uncomment `OCR_SERVER_URL=http://localhost:8828/ocr`
+and `OCR_LANGUAGE=ru` and (re)index — LiteParse routes OCR to the sidecar. It runs
+in its own env (keeps torch out of the main app) and works offline once models are
+cached. The sidecar must be running before you index. **By default** `OCR_SERVER_URL`
+is unset, so OCR works out of the box with the built-in Tesseract — no sidecar
+needed. PaddleOCR (`ocr/paddleocr`, `:8829`) works the same way — just change the URL.
+
 ## Web interface (NiceGUI)
 
 A Python-only UI: **projects on the left, chat on the right**.
