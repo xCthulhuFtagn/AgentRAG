@@ -14,7 +14,8 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, make_trace_entry
-from src.vectordb.tools import vector_search, list_collections
+from src.vectordb.config import vdb_settings
+from src.vectordb.tools import vector_search, list_collections, gather_neighbors
 
 
 async def search_fanout_node(
@@ -47,13 +48,28 @@ async def search_fanout_node(
             result = await vector_search.ainvoke({
                 "query": query,
                 "collection": collection,
-                "top_k": 5,
+                "top_k": vdb_settings.search_top_k,
                 "db_path": db_path,
             })
+            chunks = result.get("chunks", [])
+            seqs = result.get("seqs", [])
+
+            # Deterministic context expansion: stitch each hit back to its
+            # contiguous seq-neighborhood so truncated structural blocks (TOC,
+            # reference lists) come back whole. Legacy tables (no seq) → no-op.
+            if seqs and any(s is not None for s in seqs):
+                expanded = await gather_neighbors(
+                    result.get("collection", collection), seqs, db_path
+                )
+                if expanded:
+                    chunks = [e["text"] for e in expanded]
+                    seqs = [e["seq"] for e in expanded]
+
             return {
                 "collection": result.get("collection", collection),
                 "subquery": query,
-                "chunks": result.get("chunks", []),
+                "chunks": chunks,
+                "seqs": seqs,
                 "scores": result.get("scores", []),
             }
         except Exception as e:
@@ -61,6 +77,7 @@ async def search_fanout_node(
                 "collection": collection,
                 "subquery": query,
                 "chunks": [],
+                "seqs": [],
                 "scores": [],
                 "error": str(e),
             }

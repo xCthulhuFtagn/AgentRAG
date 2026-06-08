@@ -7,7 +7,7 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
 
-from src.config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from src.config import general_settings
 
 log = logging.getLogger("agentrag.node")
 
@@ -42,9 +42,9 @@ def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI:
     Uses OpenAI-compatible endpoint at api.deepseek.com/v1.
     """
     return ChatOpenAI(
-        model=model or DEEPSEEK_MODEL,
-        api_key=DEEPSEEK_API_KEY,
-        base_url=DEEPSEEK_BASE_URL,
+        model=model or general_settings.deepseek_model,
+        api_key=general_settings.deepseek_api_key,
+        base_url=general_settings.deepseek_base_url,
         temperature=temperature,
     )
 

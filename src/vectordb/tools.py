@@ -5,6 +5,7 @@ LangChain @tool wrappers for use with bind_tools() in the Search Fanout agent.
 
 from langchain_core.tools import tool
 
+from src.vectordb.config import vdb_settings
 from src.vectordb.embeddings import embed
 from src.vectordb.client import get_async_db
 
@@ -13,7 +14,7 @@ from src.vectordb.client import get_async_db
 async def vector_search(
     query: str,
     collection: str,
-    top_k: int = 5,
+    top_k: int = vdb_settings.search_top_k,
     db_path: str | None = None,
 ) -> dict:
     """Search a LanceDB collection by vector similarity.
@@ -53,7 +54,70 @@ async def vector_search(
         "query": query,
         "chunks": [r.get("text", "") for r in results],
         "scores": [r.get("_distance", 0.0) for r in results],
+        # seq = chunk position in the document; None for legacy tables indexed
+        # before the seq column existed (neighbor stitching then no-ops).
+        "seqs": [r.get("seq") for r in results],
     }
+
+
+def _merge_windows(
+    seqs: list[int], padding: int, bridge_gap: int
+) -> list[tuple[int, int]]:
+    """Turn hit seqs into merged, document-ordered [lo, hi] ranges.
+
+    Each seq → window [seq-padding, seq+padding] (lower-clamped to 0). Two
+    windows merge when the uncovered gap between them is <= bridge_gap, so a
+    single weak chunk that fell out of top-k gets bridged, while far-apart hits
+    stay as separate neighborhoods. Effective merge distance = 2*P + gap + 1.
+    """
+    uniq = sorted({s for s in seqs if s is not None})
+    if not uniq:
+        return []
+    windows = [(max(0, s - padding), s + padding) for s in uniq]
+    merged: list[list[int]] = [list(windows[0])]
+    for lo, hi in windows[1:]:
+        if lo - merged[-1][1] - 1 <= bridge_gap:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+    return [(lo, hi) for lo, hi in merged]
+
+
+async def gather_neighbors(
+    collection: str,
+    hit_seqs: list[int],
+    db_path: str | None = None,
+    padding: int = vdb_settings.expand_padding,
+    bridge_gap: int = vdb_settings.bridge_gap,
+    cap: int = vdb_settings.max_expanded,
+) -> list[dict]:
+    """Expand vector hits into their contiguous seq-neighborhoods (one collection).
+
+    Fetches every chunk in the merged ranges by seq filter-scan (no vector,
+    vectors not selected), returns [{seq, text}] in document order, capped at
+    `cap`. Empty if the table has no seq column (legacy index) → caller falls
+    back to the raw KNN chunks.
+    """
+    ranges = _merge_windows(hit_seqs, padding, bridge_gap)
+    if not ranges:
+        return []
+
+    db = await get_async_db(db_path)
+    table = await db.open_table(collection)
+
+    by_seq: dict[int, str] = {}
+    for lo, hi in ranges:
+        rows = (
+            await table.query()
+            .where(f"seq >= {lo} AND seq <= {hi}")
+            .select(["seq", "text"])
+            .limit(hi - lo + 1)
+            .to_list()
+        )
+        for r in rows:
+            by_seq[r["seq"]] = r.get("text", "")
+
+    return [{"seq": s, "text": by_seq[s]} for s in sorted(by_seq)][:cap]
 
 
 @tool

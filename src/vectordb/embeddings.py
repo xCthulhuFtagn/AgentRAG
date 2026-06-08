@@ -8,13 +8,13 @@ from functools import lru_cache
 
 from fastembed import TextEmbedding
 
-from src.config import EMBEDDING_MODEL
+from src.vectordb.config import vdb_settings
 
 
 @lru_cache(maxsize=1)
 def _get_embedding_model() -> TextEmbedding:
     """Load FastEmbed model (cached). BAAI/bge-small-en-v1.5 — 384 dims."""
-    return TextEmbedding(model_name=EMBEDDING_MODEL)
+    return TextEmbedding(model_name=vdb_settings.embedding_model)
 
 
 async def embed(text: str) -> list[float]:

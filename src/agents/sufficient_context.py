@@ -14,7 +14,7 @@ Routes:
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
-from src.config import MAX_ITERATIONS
+from src.config import general_settings
 from src.state import AgentRAGState, SufficientContextResult, make_trace_entry
 from src.agents.common import get_structured_llm
 
@@ -58,14 +58,22 @@ async def sufficient_context_node(
     2. insufficient + iterations left → Command(goto="query_rewriter") — search more
     3. insufficient + max iterations  → Command(goto="give_up") — system refusal
     """
-    max_iter = state.get("max_iterations", MAX_ITERATIONS)
+    max_iter = state.get("max_iterations", general_settings.max_iterations)
     iteration = state.get("iteration_count", 0)
 
     # Format search results
     search_results = state.get("search_results", [])
     results_str = ""
     for i, r in enumerate(search_results[-10:]):
-        chunks_str = "\n---\n".join(r.get("chunks", [])[:3])
+        chunks = r.get("chunks", [])
+        seqs = r.get("seqs", []) or []
+        # Tag each chunk with its document position so the judge can see
+        # contiguity and gaps (chunks arrive seq-ordered after stitching).
+        lines = []
+        for j, chunk in enumerate(chunks):
+            seq = seqs[j] if j < len(seqs) and seqs[j] is not None else "?"
+            lines.append(f"[seq={seq}] {chunk}")
+        chunks_str = "\n---\n".join(lines)
         results_str += (
             f"\n[Result {i+1}] Collection: {r.get('collection')}, "
             f"Query: {r.get('subquery')}\n{chunks_str}\n"

@@ -19,7 +19,7 @@ from pathlib import Path
 
 from liteparse import LiteParse
 
-from src.config import LANCE_DB_PATH
+from src.vectordb.config import vdb_settings
 from src.vectordb.embeddings import embed_batch
 from src.vectordb.client import get_sync_db
 
@@ -103,7 +103,11 @@ def clean_text(text: str) -> str:
     return text.strip()
 
 
-def split_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[str]:
+def split_text(
+    text: str,
+    chunk_size: int = vdb_settings.chunk_size,
+    overlap: int = vdb_settings.chunk_overlap,
+) -> list[str]:
     """Boundary-aware chunking — never cuts mid-word/sentence.
 
     Cleans the text, then splits recursively on paragraph → line → sentence →
@@ -121,7 +125,7 @@ def split_text(text: str, chunk_size: int = 1000, overlap: int = 150) -> list[st
     return [c.strip() for c in splitter.split_text(clean_text(text)) if c.strip()]
 
 
-async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
+async def index_documents(docs_dir: str, db_path: str = vdb_settings.lance_db_path):
     """Index all documents from a directory into LanceDB.
 
     Each file becomes a separate LanceDB collection (table).
@@ -170,9 +174,11 @@ async def index_documents(docs_dir: str, db_path: str = LANCE_DB_PATH):
 
         embeddings = await embed_batch(chunks)
 
+        # seq = chunk's position in the document — lets the retriever stitch
+        # back contiguous neighborhoods (see gather_neighbors in tools.py).
         records = [
-            {"text": chunk, "vector": emb}
-            for chunk, emb in zip(chunks, embeddings)
+            {"text": chunk, "vector": emb, "seq": i}
+            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
         ]
 
         # Sync LanceDB disk writes — also off-loop.
@@ -198,8 +204,8 @@ def main():
     )
     parser.add_argument(
         "--db",
-        default=LANCE_DB_PATH,
-        help=f"Path to LanceDB database (default: {LANCE_DB_PATH})",
+        default=vdb_settings.lance_db_path,
+        help=f"Path to LanceDB database (default: {vdb_settings.lance_db_path})",
     )
     args = parser.parse_args()
 

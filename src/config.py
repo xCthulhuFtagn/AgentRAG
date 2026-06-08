@@ -1,27 +1,31 @@
-"""Configuration — DeepSeek API, FastEmbed, LanceDB settings."""
+"""Configuration — DeepSeek API and agent-loop settings.
 
-import os
-from pathlib import Path
+Vector DB settings live in src/vectordb/config.py. Access values via the
+`general_settings` instance (e.g. general_settings.deepseek_model).
+"""
 
-from dotenv import load_dotenv
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
-load_dotenv()
 
-# DeepSeek API (OpenAI-compatible)
-DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
-DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+class GeneralSettings(BaseSettings):
+    """DeepSeek API + agent-loop knobs, read from .env / process env.
 
-# LanceDB — CLI default lives under data/ alongside the web's per-project DBs.
-# "_cli" can't collide with project ids (uuid4 hex) and isn't listed as a project
-# (projects come from data/projects/, not data/lancedb/).
-LANCE_DB_PATH: str = os.getenv("LANCE_DB_PATH", "./data/lancedb/_cli")
+    Env var names are the UPPERCASE field names (case-insensitive),
+    e.g. DEEPSEEK_API_KEY, MAX_ITERATIONS.
+    """
 
-# Agent loop
-MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "3"))
+    model_config = SettingsConfigDict(
+        env_file=".env", env_file_encoding="utf-8", extra="ignore"
+    )
 
-# Embeddings (FastEmbed)
-EMBEDDING_MODEL: str = "BAAI/bge-small-en-v1.5"
+    # DeepSeek API (OpenAI-compatible)
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
+    deepseek_model: str = "deepseek-chat"
 
-# Project root
-PROJECT_ROOT: Path = Path(__file__).parent.parent.resolve()
+    # Agent loop
+    max_iterations: int = Field(default=3, ge=1)
+
+
+general_settings = GeneralSettings()

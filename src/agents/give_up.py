@@ -8,7 +8,7 @@ from langgraph.graph import END
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
-from src.config import MAX_ITERATIONS
+from src.config import general_settings
 from src.state import AgentRAGState, make_trace_entry
 
 
@@ -19,7 +19,7 @@ def _build_refusal_answer(state: AgentRAGState) -> str:
     """
     query = state["query"]
     iteration = state.get("iteration_count", 0)
-    max_iter = state.get("max_iterations", MAX_ITERATIONS)
+    max_iter = state.get("max_iterations", general_settings.max_iterations)
 
     # Summarize what was found
     search_results = state.get("search_results", [])
@@ -78,7 +78,7 @@ async def give_up_node(
         agent="give_up",
         decision="refusal",
         detail=(
-            f"max_iterations={state.get('max_iterations', MAX_ITERATIONS)} "
+            f"max_iterations={state.get('max_iterations', general_settings.max_iterations)} "
             f"reached, context insufficient"
         ),
     )
