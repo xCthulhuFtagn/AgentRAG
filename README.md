@@ -205,6 +205,8 @@ GIGACHAT_SCOPE=GIGACHAT_API_PERS             # PERS / B2B / CORP
 GIGACHAT_MODEL=GigaChat-2-Max
 GIGACHAT_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
 GIGACHAT_VERIFY_SSL_CERTS=false              # RU Ministry CA certs; install the CA and set true to verify
+GIGACHAT_MAX_RETRIES=3                       # tenacity retries on 429/5xx/drops (free PERS tier rate-limits hard)
+GIGACHAT_RETRY_BACKOFF_FACTOR=1.0            # initial backoff seconds, doubles per retry; 429 Retry-After honored
 
 # ── Agent loop (general_settings) ──
 MAX_ITERATIONS=3                             # max search→check retries before give_up

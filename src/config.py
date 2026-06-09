@@ -30,6 +30,13 @@ class GeneralSettings(BaseSettings):
     # Development CA, absent from standard trust stores — verification is off
     # by default; install the CA and set true to enable.
     gigachat_verify_ssl_certs: bool = False
+    # Transient-error retries (tenacity policy in src/llm_retry.py): 429 (the
+    # free PERS scope is heavily rate-limited and the graph fires calls
+    # back-to-back), 5xx and connection drops, with exponential backoff +
+    # jitter (Retry-After honored). 0 disables — a single 429 becomes give_up.
+    gigachat_max_retries: int = Field(default=3, ge=0)
+    # Initial backoff delay in seconds (doubles each retry, capped at 60s).
+    gigachat_retry_backoff_factor: float = Field(default=1.0, ge=0)
 
     # Agent loop
     max_iterations: int = Field(default=3, ge=1)
