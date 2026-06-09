@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 def _coerce_list(v):
     """Coerce a list field that arrived as a JSON-encoded string back to a list.
 
-    DeepSeek's function-calling sometimes serializes an array argument as a
+    Function-calling backends sometimes serialize an array argument as a
     string (e.g. missing_parts='["a","b"]' instead of ["a","b"]), which fails
     Pydantic's list validation and crashes the whole graph run. Parse the string
     as JSON when possible; a non-JSON string becomes a single-item list.
@@ -43,7 +43,7 @@ class RouteStep(BaseModel):
     the collection/subquery it justifies, so the choice follows the reasoning
     instead of being rationalized after the fact.
 
-    All three fields are strictly required and non-empty: a step DeepSeek emits
+    All three fields are strictly required and non-empty: a step the model emits
     with a missing or blank collection/subquery (e.g. only 'rationale') is not a
     usable route, so it raises ValidationError. generate_structured then re-prompts
     with the error and, if the model keeps failing, routes to give_up — the same

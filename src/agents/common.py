@@ -6,7 +6,7 @@ from contextvars import ContextVar
 from functools import lru_cache
 
 from langchain_core.callbacks import AsyncCallbackHandler
-from langchain_openai import ChatOpenAI
+from langchain_gigachat.chat_models import GigaChat
 from langgraph.types import Command
 
 from src.config import general_settings
@@ -25,12 +25,17 @@ class StructuredGenerationError(RuntimeError):
     """The LLM could not produce a usable structured result after all retries."""
 
 
-# Transport/API errors from the OpenAI-compatible client count as LLM failures
-# too (rate limits, 5xx, connection drops). Imported defensively so a missing
-# openai package never breaks startup.
+# Transport/API errors from the GigaChat client count as LLM failures too
+# (auth/token refresh failures, rate limits, 5xx, connection drops — the SDK
+# raises GigaChatException, lower-level drops surface as httpx.HTTPError).
+# Imported defensively so a missing package never breaks startup.
 try:  # pragma: no cover - import guard
-    from openai import APIError as _OpenAIAPIError
-    _LLM_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (_OpenAIAPIError,)
+    import httpx
+    from gigachat.exceptions import GigaChatException as _GigaChatException
+    _LLM_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+        _GigaChatException,
+        httpx.HTTPError,
+    )
 except Exception:  # pragma: no cover
     _LLM_TRANSPORT_ERRORS = ()
 
@@ -148,7 +153,7 @@ def llm_failsafe(node_name: str):
     """Wrap a node so an unrecoverable LLM failure routes to give_up, not a crash.
 
     Catches `LLM_FAILURE_ERRORS` — StructuredGenerationError (the model couldn't
-    produce a usable structured result after retries) and OpenAI API/transport
+    produce a usable structured result after retries) and GigaChat API/transport
     errors (raised by the plain-LLM nodes). Anything else propagates: a code bug
     must not be silently masked as "the model failed". On catch, redirects to
     give_up with `llm_error` set so the refusal honestly cites the model problem.
@@ -180,27 +185,31 @@ def llm_failsafe(node_name: str):
 
 
 @lru_cache(maxsize=4)
-def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI:
-    """Get a configured DeepSeek LLM instance (cached).
+def get_llm(temperature: float = 0.0, model: str | None = None) -> GigaChat:
+    """Get a configured GigaChat LLM instance (cached).
 
-    Uses OpenAI-compatible endpoint at api.deepseek.com/v1.
+    GigaChat's API rejects temperature=0 (the allowed range is (0, 2]); the
+    documented way to get deterministic output is top_p=0, so a non-positive
+    `temperature` is translated to that instead of being sent.
     """
-    return ChatOpenAI(
-        model=model or general_settings.deepseek_model,
-        api_key=general_settings.deepseek_api_key,
-        base_url=general_settings.deepseek_base_url,
-        temperature=temperature,
+    sampling = {"temperature": temperature} if temperature > 0 else {"top_p": 0.0}
+    return GigaChat(
+        model=model or general_settings.gigachat_model,
+        credentials=general_settings.gigachat_credentials,
+        scope=general_settings.gigachat_scope,
+        base_url=general_settings.gigachat_base_url,
+        verify_ssl_certs=general_settings.gigachat_verify_ssl_certs,
         callbacks=[_token_handler],
+        **sampling,
     )
 
 
 def get_structured_llm(schema, temperature: float = 0.0):
     """LLM that returns a validated Pydantic object.
 
-    Uses method="function_calling" — DeepSeek's API does not support the
-    json_schema `response_format` that with_structured_output() picks by
-    default (returns 'This response_format type is unavailable now').
-    Function calling is the OpenAI-compatible path DeepSeek does support.
+    Uses method="function_calling" — GigaChat's native function-calling path,
+    supported by langchain-gigachat. Kept explicit so every structured node
+    goes through the same mechanism regardless of library defaults.
     """
     return get_llm(temperature).with_structured_output(
         schema, method="function_calling"

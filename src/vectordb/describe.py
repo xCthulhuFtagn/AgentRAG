@@ -5,13 +5,13 @@ document and produces a short description, stored alongside the table (see
 descriptions.py) and surfaced to the Planner so it can pick a source from a
 summary, not just the table name.
 
-Self-contained: builds its own DeepSeek client from general_settings (the
+Self-contained: builds its own GigaChat client from general_settings (the
 shared API config), so vectordb stays independent of the agent graph.
 """
 
 from functools import lru_cache
 
-from langchain_openai import ChatOpenAI
+from langchain_gigachat.chat_models import GigaChat
 
 from src.config import general_settings
 from src.vectordb.config import vdb_settings
@@ -27,13 +27,19 @@ Description:"""
 
 
 @lru_cache(maxsize=1)
-def _describe_llm() -> ChatOpenAI:
-    """Plain DeepSeek client for text descriptions (cached)."""
-    return ChatOpenAI(
-        model=general_settings.deepseek_model,
-        api_key=general_settings.deepseek_api_key,
-        base_url=general_settings.deepseek_base_url,
-        temperature=0.0,
+def _describe_llm() -> GigaChat:
+    """Plain GigaChat client for text descriptions (cached).
+
+    top_p=0 instead of temperature=0 — GigaChat rejects temperature outside
+    (0, 2]; top_p=0 is its documented deterministic mode.
+    """
+    return GigaChat(
+        model=general_settings.gigachat_model,
+        credentials=general_settings.gigachat_credentials,
+        scope=general_settings.gigachat_scope,
+        base_url=general_settings.gigachat_base_url,
+        verify_ssl_certs=general_settings.gigachat_verify_ssl_certs,
+        top_p=0.0,
     )
 
 

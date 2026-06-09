@@ -112,7 +112,7 @@ async def planner_node(
             query=state["query"],
             collections=collections_str,
         )
-    # RouteStep requires a non-empty collection/subquery, so a step DeepSeek
+    # RouteStep requires a non-empty collection/subquery, so a step the model
     # under-fills (only rationale) fails validation; generate_structured re-prompts
     # with the error and, if the model keeps failing, routes to give_up.
     plan: PlanResult = await generate_structured(PlanResult, prompt)

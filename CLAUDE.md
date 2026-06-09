@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Agentic RAG — multi-agent retrieval pipeline on LangGraph + DeepSeek + LanceDB.
+Agentic RAG — multi-agent retrieval pipeline on LangGraph + GigaChat + LanceDB.
 
 ## Architecture
 
@@ -53,8 +53,8 @@ relevant route — on the initial turn or on iteration — it goes straight to
 - **All async** — nodes are `async def`, tools are `async def`, streaming via `graph.astream()`
 - **Only vector search tools** — `vector_search` and `list_collections` via LanceDB; no web/Wikipedia APIs
 - **Honest refusal** — Give Up node builds a system-generated message (no LLM) listing what was found, what's missing, and why
-- **Structured output via function calling** — `get_structured_llm()` in `common.py` uses `with_structured_output(schema, method="function_calling")`. DeepSeek's API rejects the default json_schema `response_format` ("This response_format type is unavailable now").
-- **Validation-driven retries + honest LLM-failure refusal** — every structured node calls `generate_structured(schema, prompt)` (`common.py`), not the raw LLM. Every requirement on a result is a Pydantic constraint (required fields; `RouteStep._non_empty` rejects blank `collection`/`subquery`; `SufficientContextResult._verdict_must_be_actionable` rejects a `sufficient=False` verdict with no `missing_parts`/`feedback`). A violation — or a transport error, or no tool call — raises, and `generate_structured` re-prompts with the failure text up to `STRUCTURED_MAX_RETRIES` times (one uniform path: no per-schema retry hooks). If the model still can't satisfy the schema it raises `StructuredGenerationError`; the `llm_failsafe` wrapper (applied to every node except `give_up` in `build_graph`) catches that **and** `openai.APIError` from the free-text nodes (`query_rewriter`/`synthesis`), routing to `give_up` with `llm_error` set so the refusal honestly cites the model failure instead of crashing. Non-LLM exceptions (code bugs) propagate.
+- **Structured output via function calling** — `get_structured_llm()` in `common.py` uses `with_structured_output(schema, method="function_calling")` — GigaChat's native function-calling path; kept explicit so every structured node goes through the same mechanism regardless of library defaults.
+- **Validation-driven retries + honest LLM-failure refusal** — every structured node calls `generate_structured(schema, prompt)` (`common.py`), not the raw LLM. Every requirement on a result is a Pydantic constraint (required fields; `RouteStep._non_empty` rejects blank `collection`/`subquery`; `SufficientContextResult._verdict_must_be_actionable` rejects a `sufficient=False` verdict with no `missing_parts`/`feedback`). A violation — or a transport error, or no tool call — raises, and `generate_structured` re-prompts with the failure text up to `STRUCTURED_MAX_RETRIES` times (one uniform path: no per-schema retry hooks). If the model still can't satisfy the schema it raises `StructuredGenerationError`; the `llm_failsafe` wrapper (applied to every node except `give_up` in `build_graph`) catches that **and** GigaChat transport errors (`gigachat.exceptions.GigaChatException`, `httpx.HTTPError`) from the free-text nodes (`query_rewriter`/`synthesis`), routing to `give_up` with `llm_error` set so the refusal honestly cites the model failure instead of crashing. Non-LLM exceptions (code bugs) propagate.
 - **Schema-Guided Reasoning (field order = reasoning order)** — structured output is generated field-by-field in declaration order, so a schema's fields must read like a person's reasoning chain with the verdict near the end, not the start. `SufficientContextResult` (`state.py`) is ordered `reason → draft_answer → missing_parts → sufficient → feedback`: the judge analyzes, drafts the answer, and lists gaps **before** emitting the `sufficient` boolean, and only **then** (if insufficient) the `feedback` on where to search next. The verdict is thus grounded in the reasoning it just generated. When `sufficient` was the *first* field, the judge committed to the boolean up front and rationalized it — letting "not found" drafts pass as `sufficient=True`. The field `description`s also carry the semantics (e.g. a "not found / absent" draft is never `sufficient`).
 - **Logging** — `logged_node` decorator (in `common.py`, applied centrally in `build_graph`) is the single point that emits each node's `trace` entries as `logging` records under the `agentrag` logger. `setup_logging()` (`src/logging_setup.py`) is called by both `src/main.py` and `web/app.py`, so node decisions appear identically under CLI and web. `main.py` prints only the final answer (program output, not a log); the web UI's live trace stream is a separate channel.
 - **Per-step token metering** — `logged_node` also meters token usage: it installs a fresh sink (a `_token_sink` `ContextVar`) before each node runs, and `_TokenUsageHandler` (an `AsyncCallbackHandler` attached to every LLM via `get_llm`'s `callbacks=`) adds each call's `prompt_tokens`/`completion_tokens` into the current sink. Works for **structured** calls too (function-calling returns a parsed object with no `usage_metadata`, so a callback is the only place to catch them), and sums across **concurrent** calls (a node's `asyncio.gather` subtasks copy the context, so they share the sink set before the gather). Totals are stamped onto each trace entry as `input_tokens`/`output_tokens` → logged inline (`[in=… out=…]`) and shown in the web UI as a second line under each step plus a per-message Σ total.
@@ -75,7 +75,7 @@ relevant route — on the initial turn or on iteration — it goes straight to
 - `embeddings.py` — FastEmbed (ONNX, `paraphrase-multilingual-MiniLM-L12-v2`, **384d**, multilingual incl. Russian — an English-only model blinds retrieval on a non-English corpus); `embed`/`embed_batch` run sync ONNX off the loop via `asyncio.to_thread`; model cached `@lru_cache`.
 - `client.py` — `get_async_db(db_path)` / `get_sync_db(db_path)`; `db_path or LANCE_DB_PATH`.
 - `config.py` — `VectorDBSettings` (pydantic-settings, `vdb_settings` instance): all vectordb knobs from `.env` (path, model, chunking, search, stitching). See [Configuration](#configuration).
-- `describe.py` — `describe_document(text)`: LLM reads an excerpt at index time → a 1–2 sentence content summary. Self-contained (builds its own DeepSeek client from `general_settings`, no `agents` import).
+- `describe.py` — `describe_document(text)`: LLM reads an excerpt at index time → a 1–2 sentence content summary. Self-contained (builds its own GigaChat client from `general_settings`, no `agents` import).
 - `descriptions.py` — JSON sidecar (`{db_path}/_descriptions.json`, `table → {file, description}`) storage; `load_descriptions`/`save_descriptions`. Written at index time, read by the Planner.
 - `tools.py` — `vector_search(query, collection, top_k, db_path)` and `list_collections(db_path)` as LangChain `@tool`s. **Async LanceDB gotcha**: `search()` is a coroutine — `q = await table.search(vec)` then `await q.limit(k).to_list()`. Returns chunk `text` + `_distance` (L2, default metric) + `seq` (chunk position). `gather_neighbors(collection, hit_seqs, …)` does the neighbor stitching (filter-scan by `seq`, no vector).
 - `indexer.py` — `index_documents(dir, db_path)`. Hybrid extraction (LiteParse for PDF/DOCX/PPTX, `read_text` for TXT/MD) → `clean_text` (collapse ragged whitespace) → `split_text` (RecursiveCharacterTextSplitter, `CHUNK_SIZE`/`CHUNK_OVERLAP` chars, splits on para→line→sentence→word, never mid-word) → `embed_batch` → rows `{text, vector, seq}`. CLI: `python -m src.vectordb.indexer --dir docs/sample_docs`. LiteParse OCRs scanned/image pages with built-in Tesseract by default; set `OCR_SERVER_URL` (+ `OCR_LANGUAGE`) to delegate to a local EasyOCR/PaddleOCR sidecar via `_get_parser()` — better Cyrillic, silences Tesseract's "Image too small to scale!!" native stderr noise.
@@ -101,15 +101,15 @@ The judge uses the inventory **two ways**, and the prompt must keep them distinc
 - `indexing.py` — `reindex_project(id)`: wipe `data/lancedb/{id}`, re-run `index_documents`; status `reindexing`→`idle`.
 - `chat.py` — `run_chat(project_id, query)`: fresh `thread_id` per message (no state bleed), streams `(trace|answer)` from `graph.astream`.
 
-## DeepSeek API
+## GigaChat API
 
-OpenAI-compatible endpoint at `https://api.deepseek.com/v1`. Model: `deepseek-chat`. Key from VSCode settings → `.env`. LLM factory cached via `@lru_cache` in `src/agents/common.py`.
+Sber endpoint at `https://gigachat.devices.sberbank.ru/api/v1` via the official `langchain-gigachat` integration. Model: `GigaChat-2-Max` — the freshest API-available flagship (GigaChat Ultra is chat-only, no API yet). Auth: `GIGACHAT_CREDENTIALS` (base64 authorization key from developers.sber.ru) + `GIGACHAT_SCOPE`; the SDK exchanges the key for a 30-min access token and refreshes it automatically. `GIGACHAT_VERIFY_SSL_CERTS=false` by default — the API serves certs from the RU Ministry of Digital Development CA, absent from standard trust stores. **Temperature gotcha**: GigaChat rejects `temperature=0` (allowed range `(0, 2]`) — `get_llm` translates a non-positive temperature into `top_p=0`, the documented deterministic mode. LLM factory cached via `@lru_cache` in `src/agents/common.py`.
 
 ## Configuration
 
 Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, read from `.env` / process env (env var = UPPERCASE field name, case-insensitive). Two objects, two scopes:
 
-- **`general_settings`** (`src/config.py`) — DeepSeek + agent loop: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `MAX_ITERATIONS`, `STRUCTURED_MAX_RETRIES` (default `1`; extra clarification re-prompts on a schema-validation failure before `generate_structured` gives up → `give_up`; `0` disables).
+- **`general_settings`** (`src/config.py`) — GigaChat + agent loop: `GIGACHAT_CREDENTIALS`, `GIGACHAT_SCOPE`, `GIGACHAT_MODEL`, `GIGACHAT_BASE_URL`, `GIGACHAT_VERIFY_SSL_CERTS`, `MAX_ITERATIONS`, `STRUCTURED_MAX_RETRIES` (default `1`; extra clarification re-prompts on a schema-validation failure before `generate_structured` gives up → `give_up`; `0` disables).
 - **`vdb_settings`** (`src/vectordb/config.py`) — the vectordb package owns its own knobs:
 
 | Env var | Default | Meaning |
@@ -127,7 +127,7 @@ Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, 
 | `BRIDGE_GAP` | `2` | merge windows when uncovered gap ≤ this |
 | `MAX_EXPANDED` | `16` | cap on stitched chunks per result |
 
-All have defaults — only `DEEPSEEK_API_KEY` is required. Access values via the objects (`vdb_settings.search_top_k`), never module-level constants. Validation rejects bad values (e.g. `SEARCH_TOP_K=0` → `ge=1` error) at startup.
+All have defaults — only `GIGACHAT_CREDENTIALS` is required. Access values via the objects (`vdb_settings.search_top_k`), never module-level constants. Validation rejects bad values (e.g. `SEARCH_TOP_K=0` → `ge=1` error) at startup.
 
 ## Iteration loop
 

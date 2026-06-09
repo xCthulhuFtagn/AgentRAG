@@ -1,6 +1,6 @@
 # Agentic RAG — Multi-Agent Retrieval Pipeline
 
-Implementation of Google Research's [Agentic RAG](https://research.google/blog/unlocking-dependable-responses-with-gemini-enterprise-agent-platforms-agentic-rag/) (Gemini Enterprise Agent Platform) on LangGraph + DeepSeek + LanceDB.
+Implementation of Google Research's [Agentic RAG](https://research.google/blog/unlocking-dependable-responses-with-gemini-enterprise-agent-platforms-agentic-rag/) (Gemini Enterprise Agent Platform) on LangGraph + GigaChat + LanceDB.
 
 **Key insight:** vanilla RAG gives up after one search. Agentic RAG iteratively searches, checks if context is sufficient, explicitly states *what's missing*, and searches again — up to 34% accuracy improvement on FramesQA.
 
@@ -59,7 +59,7 @@ finds no relevant route — initial turn or iteration — it goes straight to
 
 | Component | Choice | Why |
 |-----------|--------|-----|
-| LLM | DeepSeek (`deepseek-chat`) | OpenAI-compatible API; structured output via function calling |
+| LLM | GigaChat (`GigaChat-2-Max`) | Freshest API-available Sber flagship; structured output via native function calling |
 | Orchestration | LangGraph | Command-driven edgeless graph |
 | Vector DB | LanceDB | Serverless, async, columnar files; per-project isolation |
 | Embeddings | FastEmbed (`paraphrase-multilingual-MiniLM-L12-v2`) | ONNX, no PyTorch, multilingual (incl. Russian), air-gapped friendly |
@@ -73,7 +73,7 @@ finds no relevant route — initial turn or iteration — it goes straight to
 # Install
 pip install -r requirements.txt
 
-# Configure (only DEEPSEEK_API_KEY is required; see Configuration)
+# Configure (only GIGACHAT_CREDENTIALS is required; see Configuration)
 cp .env.example .env && $EDITOR .env
 
 # ── Web UI (projects + chat) ──
@@ -191,18 +191,20 @@ Everything lives under `data/` (created automatically). The CLI's global DB is j
 
 ## Configuration
 
-All settings are **pydantic-settings** classes — typed, validated, loaded from `.env` (or the process environment). Env var names are the UPPERCASE field names. Every value has a default, so **only `DEEPSEEK_API_KEY` is strictly required**; bad values are rejected at startup (e.g. `SEARCH_TOP_K=0` fails the `≥1` check).
+All settings are **pydantic-settings** classes — typed, validated, loaded from `.env` (or the process environment). Env var names are the UPPERCASE field names. Every value has a default, so **only `GIGACHAT_CREDENTIALS` is strictly required**; bad values are rejected at startup (e.g. `SEARCH_TOP_K=0` fails the `≥1` check).
 
 There are two scopes:
 
-- **`general_settings`** ([src/config.py](src/config.py)) — DeepSeek API + the agent loop.
+- **`general_settings`** ([src/config.py](src/config.py)) — GigaChat API + the agent loop.
 - **`vdb_settings`** ([src/vectordb/config.py](src/vectordb/config.py)) — the vectordb package owns its own knobs (path, embeddings, chunking, search, stitching).
 
 ```ini
-# ── DeepSeek API (general_settings) ──
-DEEPSEEK_API_KEY=sk-...                      # required
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-DEEPSEEK_MODEL=deepseek-chat
+# ── GigaChat API (general_settings) ──
+GIGACHAT_CREDENTIALS=...                     # required — base64 authorization key from developers.sber.ru
+GIGACHAT_SCOPE=GIGACHAT_API_PERS             # PERS / B2B / CORP
+GIGACHAT_MODEL=GigaChat-2-Max
+GIGACHAT_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
+GIGACHAT_VERIFY_SSL_CERTS=false              # RU Ministry CA certs; install the CA and set true to verify
 
 # ── Agent loop (general_settings) ──
 MAX_ITERATIONS=3                             # max search→check retries before give_up

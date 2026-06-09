@@ -3,7 +3,7 @@
 Self-contained config for the vectordb package (embeddings, LanceDB client,
 indexer, search tools). Uses pydantic-settings so values are parsed, validated,
 and bounds-checked instead of raw os.getenv. The global src/config.py keeps only
-DeepSeek/agent-loop concerns.
+GigaChat/agent-loop concerns.
 
 Access values via the `vdb_settings` instance (e.g. vdb_settings.search_top_k).
 Env var names are the UPPERCASE field names (matching is case-insensitive),
