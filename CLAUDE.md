@@ -105,11 +105,13 @@ The judge uses the inventory **two ways**, and the prompt must keep them distinc
 
 OpenAI-compatible endpoint at `https://api.deepseek.com/v1`. Model: `deepseek-chat`. Key from VSCode settings → `.env`. LLM factory cached via `@lru_cache` in `src/agents/common.py`.
 
+**Transient-error retries (tenacity)** — `src/llm_retry.py` is a neutral module (importable by both `agents` and `vectordb` without breaking describe.py's no-`agents` rule) exposing `ainvoke_with_retry(runnable, input)`: a tenacity `AsyncRetrying` policy used at every LLM call site (`generate_structured`, `query_rewriter`, `synthesis`, `describe_document`). Retries **only** transient errors — `openai.RateLimitError` (429: `query_rewriter`'s `asyncio.gather` over routes can burst past the account's rate limit), `openai.InternalServerError` (5xx), `openai.APIConnectionError`/`httpx.TransportError` (connection drops, timeouts) — with exponential backoff + jitter (initial `DEEPSEEK_RETRY_BACKOFF_FACTOR`, cap 60s), honoring a 429's `Retry-After`; `DEEPSEEK_CONNECTION_RETRIES` attempts (default 3, `0` disables). Auth/4xx/validation fail fast. Exhausted retries reraise → `llm_failsafe` → honest `give_up`. Distinct from `STRUCTURED_MAX_RETRIES`, which re-prompts on *semantic* (schema-validation) failures — tenacity absorbs transport noise inside each semantic attempt.
+
 ## Configuration
 
 Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, read from `.env` / process env (env var = UPPERCASE field name, case-insensitive). Two objects, two scopes:
 
-- **`general_settings`** (`src/config.py`) — DeepSeek + agent loop: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `MAX_ITERATIONS`, `STRUCTURED_MAX_RETRIES` (default `1`; extra clarification re-prompts on a schema-validation failure before `generate_structured` gives up → `give_up`; `0` disables).
+- **`general_settings`** (`src/config.py`) — DeepSeek + agent loop: `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL`, `DEEPSEEK_MODEL`, `DEEPSEEK_CONNECTION_RETRIES`/`DEEPSEEK_RETRY_BACKOFF_FACTOR` (tenacity transient-error policy, see above), `MAX_ITERATIONS`, `STRUCTURED_MAX_RETRIES` (default `1`; extra clarification re-prompts on a schema-validation failure before `generate_structured` gives up → `give_up`; `0` disables).
 - **`vdb_settings`** (`src/vectordb/config.py`) — the vectordb package owns its own knobs:
 
 | Env var | Default | Meaning |

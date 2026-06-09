@@ -23,6 +23,12 @@ class GeneralSettings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
     deepseek_model: str = "deepseek-chat"
+    # Transient-error retries (tenacity policy in src/llm_retry.py): 429, 5xx
+    # and connection drops, with exponential backoff + jitter (Retry-After
+    # honored). 0 disables — a single 429 becomes give_up.
+    deepseek_connection_retries: int = Field(default=3, ge=0)
+    # Initial backoff delay in seconds (doubles each retry, capped at 60s).
+    deepseek_retry_backoff_factor: float = Field(default=1.0, ge=0)
 
     # Agent loop
     max_iterations: int = Field(default=3, ge=1)

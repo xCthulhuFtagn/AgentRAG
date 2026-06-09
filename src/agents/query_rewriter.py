@@ -11,6 +11,7 @@ from langgraph.types import Command
 
 from src.state import AgentRAGState, make_trace_entry
 from src.agents.common import get_llm
+from src.llm_retry import ainvoke_with_retry
 
 REWRITER_PROMPT = """You are the Query Rewriter Agent of an Agentic RAG system.
 
@@ -41,7 +42,7 @@ async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str
         collection=collection,
         subquery=step.get("subquery", original_query),
     )
-    result: str = (await llm.ainvoke(prompt)).content.strip().strip('"')
+    result: str = (await ainvoke_with_retry(llm, prompt)).content.strip().strip('"')
     return collection, result
 
 

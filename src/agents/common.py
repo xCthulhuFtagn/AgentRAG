@@ -10,6 +10,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.types import Command
 
 from src.config import general_settings
+from src.llm_retry import ainvoke_with_retry
 from src.state import make_trace_entry
 from src.vectordb.tools import list_collections_described
 
@@ -217,6 +218,10 @@ async def generate_structured(schema, prompt: str, *, temperature: float = 0.0):
     `general_settings.structured_max_retries` times; if the model still can't
     satisfy the schema, raise StructuredGenerationError, which `llm_failsafe`
     turns into an honest give_up refusal instead of letting the graph crash.
+
+    Two retry layers with distinct jobs: ainvoke_with_retry (tenacity) absorbs
+    transient transport errors (429/5xx/drops) inside each attempt; this loop
+    re-prompts only on semantic failures the model can actually correct.
     """
     retries = general_settings.structured_max_retries
     llm = get_structured_llm(schema, temperature)
@@ -224,7 +229,7 @@ async def generate_structured(schema, prompt: str, *, temperature: float = 0.0):
     for attempt in range(retries + 1):
         last = attempt >= retries
         try:
-            result = await llm.ainvoke(current)
+            result = await ainvoke_with_retry(llm, current)
             if result is None:  # no tool call came back
                 raise ValueError("the model returned no structured output")
             return result

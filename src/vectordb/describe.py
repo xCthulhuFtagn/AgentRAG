@@ -14,6 +14,7 @@ from functools import lru_cache
 from langchain_openai import ChatOpenAI
 
 from src.config import general_settings
+from src.llm_retry import ainvoke_with_retry
 from src.vectordb.config import vdb_settings
 
 DESCRIBE_PROMPT = """You summarize a document so a retrieval planner can decide whether to search it for a given query.
@@ -51,7 +52,9 @@ async def describe_document(text: str, max_chars: int | None = None) -> str:
     if not excerpt:
         return ""
     try:
-        resp = await _describe_llm().ainvoke(DESCRIBE_PROMPT.format(excerpt=excerpt))
+        resp = await ainvoke_with_retry(
+            _describe_llm(), DESCRIBE_PROMPT.format(excerpt=excerpt)
+        )
         return resp.content.strip()
     except Exception:
         return ""

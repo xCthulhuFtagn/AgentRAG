@@ -9,6 +9,7 @@ from langgraph.types import Command
 
 from src.state import AgentRAGState, make_trace_entry
 from src.agents.common import get_llm, get_inventory_str
+from src.llm_retry import ainvoke_with_retry
 
 SYNTHESIS_PROMPT = """You are the Synthesis Agent of an Agentic RAG system.
 
@@ -72,7 +73,7 @@ async def synthesis_node(
         context_note=context_note,
     )
 
-    answer: str = (await llm.ainvoke(prompt)).content.strip()
+    answer: str = (await ainvoke_with_retry(llm, prompt)).content.strip()
 
     trace_entry = make_trace_entry(
         agent="synthesis",

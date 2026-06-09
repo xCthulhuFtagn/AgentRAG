@@ -203,6 +203,8 @@ There are two scopes:
 DEEPSEEK_API_KEY=sk-...                      # required
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat
+DEEPSEEK_CONNECTION_RETRIES=3                # tenacity retries on 429/5xx/connection drops (0 disables)
+DEEPSEEK_RETRY_BACKOFF_FACTOR=1.0            # initial backoff seconds, doubles per retry; 429 Retry-After honored
 
 # ── Agent loop (general_settings) ──
 MAX_ITERATIONS=3                             # max search→check retries before give_up
