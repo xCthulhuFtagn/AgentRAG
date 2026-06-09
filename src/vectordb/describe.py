@@ -17,14 +17,14 @@ from src.config import general_settings
 from src.llm_retry import ainvoke_with_retry
 from src.vectordb.config import vdb_settings
 
-DESCRIBE_PROMPT = """You summarize a document so a retrieval planner can decide whether to search it for a given query.
+DESCRIBE_PROMPT = """Ты составляешь краткое описание документа, чтобы планировщик поиска мог решить, искать ли в нём ответ на запрос.
 
-In 1-2 sentences, state what this document is: its type (e.g. research paper, manual, essay, report, dataset) and its main topic/subject. Be specific and concrete (name the domain, key entities). Do not begin with "This document". Write in the document's own language.
+В 1-2 предложениях укажи, что это за документ: его тип (например, научная статья, руководство, эссе, отчёт, набор данных) и основную тему/предмет. Будь конкретен (назови область, ключевые сущности). Не начинай со слов «Этот документ». Пиши на языке самого документа.
 
-Document text (excerpt):
+Текст документа (фрагмент):
 {excerpt}
 
-Description:"""
+Описание:"""
 
 
 @lru_cache(maxsize=1)

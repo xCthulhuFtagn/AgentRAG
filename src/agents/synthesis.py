@@ -11,35 +11,34 @@ from src.state import AgentRAGState, make_trace_entry
 from src.agents.common import get_llm, get_inventory_str
 from src.llm_retry import ainvoke_with_retry
 
-SYNTHESIS_PROMPT = """You are the Synthesis Agent of an Agentic RAG system.
+SYNTHESIS_PROMPT = """Ты — Агент-Синтезатор (Synthesis) в системе Agentic RAG.
 
-Your job: produce a comprehensive, accurate, and well-structured final answer
-based on ALL the retrieved context.
+Твоя задача: дать исчерпывающий, точный и хорошо структурированный финальный
+ответ на основе ВСЕГО найденного контекста.
 
-User question: {query}
+Вопрос пользователя: {query}
 
-Complete knowledge base inventory (every document that exists, with a short description of each):
+Полная опись базы знаний (все существующие документы, с кратким описанием каждого):
 {inventory}
 
-Retrieved context from multiple searches:
+Контекст, найденный за несколько поисков:
 {search_results}
 
-Sufficient Context Agent assessment: {sufficient_reason}
+Оценка Агента Достаточности Контекста: {sufficient_reason}
 
-Guidelines:
-1. Answer ALL parts of the question completely
-2. Base your answer ONLY on the retrieved context and the inventory above — do not make up facts, and do not guess/expand abbreviations from general knowledge
-3. NEVER refuse. You were reached because the context was judged sufficient, so give a direct best-effort answer from what IS in the context. Extract whatever the chunks actually state (e.g. an abbreviation expanded inside a sentence) and lead with it. Refusal is a different node's job, not yours
-4. State remaining uncertainty in ONE short closing line at most — do not turn the answer into a "what is missing / consult other documents" disclaimer, and do not tell the user to look elsewhere
-5. Cite which collection/document each piece of information came from
-6. Be clear, concise, and well-structured
-7. For "describe/list ALL files"-type questions, the inventory is the authoritative
-   list — describe every document in it, enriching each from the retrieved chunks
-   where available
+Правила:
+1. Ответь на ВСЕ части вопроса полностью
+2. Опирайся ТОЛЬКО на найденный контекст и опись выше — не выдумывай факты и не угадывай/не расшифровывай аббревиатуры из общих знаний
+3. НИКОГДА не отказывайся отвечать. Ты вызван потому, что контекст признан достаточным, — дай прямой ответ по максимуму того, что В контексте ЕСТЬ. Извлеки то, что фрагменты реально утверждают (например, аббревиатуру, расшифрованную внутри предложения), и начни с этого. Отказ — работа другого узла, не твоя
+4. Оставшуюся неопределённость умести максимум в ОДНУ короткую завершающую строку — не превращай ответ в дисклеймер «чего не хватает / посмотрите в других документах» и не отправляй пользователя искать в другом месте
+5. Указывай, из какой коллекции/документа взят каждый фрагмент информации
+6. Пиши ясно, лаконично и структурированно
+7. Для вопросов типа «опиши/перечисли ВСЕ файлы» опись — авторитетный список:
+   опиши каждый документ из неё, дополняя найденными фрагментами там, где они есть
 
-Context completeness note: {context_note}
+Заметка о полноте контекста: {context_note}
 
-Now, produce the final answer:"""
+Теперь дай финальный ответ:"""
 
 
 async def synthesis_node(
@@ -52,16 +51,16 @@ async def synthesis_node(
     for i, r in enumerate(state.get("search_results", [])):
         chunks_str = "\n---\n".join(r.get("chunks", []))
         results_str += (
-            f"\n### Source {i+1}: {r.get('collection', 'unknown')}\n"
-            f"Query: {r.get('subquery', 'unknown')}\n"
-            f"Content:\n{chunks_str}\n"
+            f"\n### Источник {i+1}: {r.get('collection', 'неизвестно')}\n"
+            f"Запрос: {r.get('subquery', 'неизвестно')}\n"
+            f"Содержимое:\n{chunks_str}\n"
         )
 
     if not results_str:
-        results_str = "(No context retrieved)"
+        results_str = "(контекст не получен)"
 
     # Synthesis is only reached after the judge ruled the context sufficient.
-    context_note = "Context is sufficient — answer fully from it."
+    context_note = "Контекст признан достаточным — отвечай полностью на его основе."
 
     inventory = await get_inventory_str(state.get("db_path"))
 

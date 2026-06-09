@@ -13,21 +13,21 @@ from src.state import AgentRAGState, make_trace_entry
 from src.agents.common import get_llm
 from src.llm_retry import ainvoke_with_retry
 
-REWRITER_PROMPT = """You are the Query Rewriter Agent of an Agentic RAG system.
+REWRITER_PROMPT = """Ты — Агент-Переписчик Запросов (Query Rewriter) в системе Agentic RAG.
 
-Your job: convert a search route into a precise, search-optimized query for vector search.
+Твоя задача: превратить поисковый маршрут в точный запрос, оптимизированный для векторного поиска.
 
-Original user question: {original_query}
-Current search target: collection '{collection}'
-What we're looking for: {subquery}
+Исходный вопрос пользователя: {original_query}
+Текущая цель поиска: коллекция '{collection}'
+Что ищем: {subquery}
 
-Guidelines:
-1. Be specific and use keywords likely to appear in documents
-2. Remove question words (who, what, why) — use declarative form
-3. Include synonyms and related terms
-4. Keep it concise (1-2 sentences max)
+Правила:
+1. Будь конкретен, используй ключевые слова, которые вероятно встречаются в документах
+2. Убери вопросительные слова (кто, что, почему) — используй утвердительную форму
+3. Добавь синонимы и связанные термины
+4. Будь краток (максимум 1-2 предложения)
 
-Return ONLY the rewritten search query text, nothing else."""
+Верни ТОЛЬКО текст переписанного поискового запроса, ничего больше."""
 
 
 async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str]:

@@ -18,42 +18,42 @@ from src.config import general_settings
 from src.state import AgentRAGState, SufficientContextResult, make_trace_entry
 from src.agents.common import generate_structured, get_inventory_str
 
-SUFFICIENT_CONTEXT_PROMPT = """You are the Sufficient Context Agent — the quality-control inspector of an Agentic RAG system.
+SUFFICIENT_CONTEXT_PROMPT = """Ты — Агент Достаточности Контекста (Sufficient Context) — контролёр качества в системе Agentic RAG.
 
-Your job: determine if the retrieved context is COMPLETE enough to answer the user's question.
+Твоя задача: определить, ПОЛОН ли найденный контекст настолько, чтобы ответить на вопрос пользователя.
 
-User question: {query}
+Вопрос пользователя: {query}
 
-Complete knowledge base inventory (GROUND TRUTH — these are ALL the collections that exist, with a short description of each):
+Полная опись базы знаний (ИСТИНА В ПОСЛЕДНЕЙ ИНСТАНЦИИ — это ВСЕ существующие коллекции, с кратким описанием каждой):
 {inventory}
 
-Retrieved context from searches (each block is tagged with the collection it came from):
+Контекст, найденный поисками (каждый блок помечен коллекцией, из которой он пришёл):
 {search_results}
 
-Iteration: {iteration} of {max_iterations}
-Previously identified gaps: {previous_gaps}
+Итерация: {iteration} из {max_iterations}
+Ранее выявленные пробелы: {previous_gaps}
 
-Analyze THREE things:
+Проанализируй ТРИ вещи:
 
-1. **Retrieved snippets**: Read all retrieved text chunks. Do they contain the FACTS needed to answer every part of the question?
+1. **Найденные фрагменты**: прочитай все найденные куски текста. Содержат ли они ФАКТЫ, нужные для ответа на каждую часть вопроса?
 
-2. **Draft answer**: Try to construct a draft answer from ALL the context accumulated so far (across every iteration). If it already answers the question, the context is SUFFICIENT — stop here. Do NOT keep searching for additional or confirmatory sources once the question is answerable.
+2. **Черновик ответа**: попробуй построить черновой ответ из ВСЕГО накопленного контекста (за все итерации). Если он уже отвечает на вопрос — контекст ДОСТАТОЧЕН, остановись. НЕ продолжай искать дополнительные или подтверждающие источники, когда ответ уже есть.
 
-3. **Missing pieces (CRITICAL)**: If anything is missing, be SPECIFIC:
-   - What exact information is missing?
-   - Which collection should we search in?
-   - What alternative search terms should be tried?
+3. **Недостающие фрагменты (КРИТИЧНО)**: если чего-то не хватает, будь КОНКРЕТЕН:
+   - Какая именно информация отсутствует?
+   - В какой коллекции её искать?
+   - Какие альтернативные поисковые формулировки попробовать?
 
-Rules (evaluate sufficiency of the WHOLE accumulated context FIRST, before thinking about searching more):
-- If the accumulated context answers the question → sufficient=True. This holds even if some collections were never searched and might contain related material. Do NOT mark insufficient just to be thorough, to double-check/confirm an answer you already have, or because another collection "might also" hold it (or "more" of it).
-- Only when the answer is genuinely MISSING or INCOMPLETE → sufficient=False, with specific feedback (what's missing, which collection to search next)
-- A "not found / not defined / not mentioned" answer is NOT sufficient while any collection that could plausibly hold the answer has NOT been searched yet — set sufficient=False and route there. (This applies only when the answer is actually absent — not to verify an answer already present.)
-- It's better to flag insufficient and search again than to guess — but only when something is truly missing, not merely unconfirmed
-- Be consistent: if your feedback says to search more, then sufficient MUST be False
+Правила (СНАЧАЛА оцени достаточность ВСЕГО накопленного контекста, и только потом думай о новых поисках):
+- Если накопленный контекст отвечает на вопрос → sufficient=True. Это верно, даже если какие-то коллекции не обысканы и могли бы содержать смежный материал. НЕ ставь «недостаточно» ради дотошности, ради перепроверки уже имеющегося ответа или потому что другая коллекция «тоже может» его содержать (или содержать «больше»).
+- Только когда ответ действительно ОТСУТСТВУЕТ или НЕПОЛОН → sufficient=False с конкретной обратной связью (чего не хватает, в какой коллекции искать дальше)
+- Ответ вида «не найдено / не определено / не упоминается» НЕ достаточен, пока остаётся необысканная коллекция, которая правдоподобно может содержать ответ — ставь sufficient=False и направляй туда. (Это касается только случая, когда ответ действительно отсутствует — не перепроверки уже имеющегося.)
+- Лучше пометить «недостаточно» и поискать ещё, чем гадать — но только когда чего-то действительно не хватает, а не когда ответ просто «не подтверждён»
+- Будь последователен: если твоя обратная связь говорит искать дальше, то sufficient ОБЯЗАН быть False
 
-How to use the inventory (it is the COMPLETE, authoritative list of every document — there are no others):
-- "Describe/list ALL files"-type questions → full coverage means every collection has been searched OR is adequately summarized by its description. The inventory is exhaustive, so you CAN confirm completeness — do not demand proof of more documents.
-- SPECIFIC questions (e.g. "what is X") → if the answer is NOT in the retrieved chunks, compare the inventory against the collections that actually appear in the retrieved context above. If any collection that is NOT yet among them has a description suggesting it could contain the answer, set sufficient=False and name that collection in feedback/missing_parts. Only accept a negative answer once every plausibly-relevant collection has actually been searched."""
+Как пользоваться описью (это ПОЛНЫЙ, авторитетный список всех документов — других не существует):
+- Вопросы типа «опиши/перечисли ВСЕ файлы» → полное покрытие означает, что каждая коллекция либо обыскана, либо адекватно описана своим описанием. Опись исчерпывающа, поэтому ты МОЖЕШЬ подтвердить полноту — не требуй доказательств существования других документов.
+- КОНКРЕТНЫЕ вопросы (например, «что такое X») → если ответа НЕТ в найденных фрагментах, сравни опись с коллекциями, которые реально встречаются в найденном контексте выше. Если какая-то коллекция, которой среди них ещё НЕТ, судя по описанию может содержать ответ — ставь sufficient=False и назови её в feedback/missing_parts. Принимай отрицательный ответ только после того, как каждая правдоподобно-релевантная коллекция реально обыскана."""
 
 
 async def sufficient_context_node(
@@ -83,12 +83,12 @@ async def sufficient_context_node(
             lines.append(f"[seq={seq}] {chunk}")
         chunks_str = "\n---\n".join(lines)
         results_str += (
-            f"\n[Result {i+1}] Collection: {r.get('collection')}, "
-            f"Query: {r.get('subquery')}\n{chunks_str}\n"
+            f"\n[Результат {i+1}] Коллекция: {r.get('collection')}, "
+            f"Запрос: {r.get('subquery')}\n{chunks_str}\n"
         )
 
     if not results_str:
-        results_str = "(No search results yet)"
+        results_str = "(результатов поиска пока нет)"
 
     inventory = await get_inventory_str(state.get("db_path"))
 
@@ -98,7 +98,7 @@ async def sufficient_context_node(
         search_results=results_str,
         iteration=iteration,
         max_iterations=max_iter,
-        previous_gaps=", ".join(state.get("missing_parts", [])) or "(none)",
+        previous_gaps=", ".join(state.get("missing_parts", [])) or "(нет)",
     )
 
     result: SufficientContextResult = await generate_structured(
