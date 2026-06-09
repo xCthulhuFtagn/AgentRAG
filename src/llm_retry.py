@@ -52,7 +52,7 @@ async def ainvoke_with_retry(runnable, input_, **kwargs):
         wait=_wait_rate_limit_aware(
             initial=general_settings.gigachat_retry_backoff_factor, max=60
         ),
-        stop=stop_after_attempt(general_settings.gigachat_max_retries + 1),
+        stop=stop_after_attempt(general_settings.gigachat_connection_retries + 1),
         before_sleep=before_sleep_log(log, logging.WARNING),
         reraise=True,
     )

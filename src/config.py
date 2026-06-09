@@ -34,7 +34,7 @@ class GeneralSettings(BaseSettings):
     # free PERS scope is heavily rate-limited and the graph fires calls
     # back-to-back), 5xx and connection drops, with exponential backoff +
     # jitter (Retry-After honored). 0 disables — a single 429 becomes give_up.
-    gigachat_max_retries: int = Field(default=3, ge=0)
+    gigachat_connection_retries: int = Field(default=3, ge=0)
     # Initial backoff delay in seconds (doubles each retry, capped at 60s).
     gigachat_retry_backoff_factor: float = Field(default=1.0, ge=0)
 
