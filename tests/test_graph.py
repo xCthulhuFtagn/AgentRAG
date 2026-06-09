@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.state import (
     make_initial_state,
     AgentRAGState,
-    OrchestratorResult,
     PlanResult,
     RouteStep,
     SufficientContextResult,
@@ -42,7 +41,6 @@ def test_state_defaults():
     assert state["iteration_count"] == 0
     assert state["search_results"] == []
     assert state["trace"] == []
-    assert state["is_complex"] is None
     assert state["rewritten_queries"] == []
     # db_path defaults to None (global LANCE_DB_PATH); search_tasks empty
     assert state["db_path"] is None
@@ -68,13 +66,6 @@ def test_state_annotated_reducers():
     state["search_results"] = [{"col": "a"}]
     state["search_results"] = state["search_results"] + [{"col": "b"}]
     assert len(state["search_results"]) == 2
-
-
-def test_orchestrator_result():
-    """Verify OrchestratorResult model."""
-    result = OrchestratorResult(is_complex=True, reasoning="Multi-step query")
-    assert result.is_complex is True
-    assert result.reasoning == "Multi-step query"
 
 
 def test_plan_result():
