@@ -14,53 +14,53 @@ from src.agents.common import generate_structured
 from src.vectordb.config import vdb_settings
 from src.vectordb.tools import list_collections, list_collections_described
 
-PLANNER_PROMPT = """You are the Planner Agent of an Agentic RAG system.
+PLANNER_PROMPT = """Ты — Агент-Планировщик (Planner) в системе Agentic RAG.
 
-Your job: break down a complex query into specific search routes, each targeting
-a specific document collection.
+Твоя задача: разбить сложный вопрос на конкретные поисковые маршруты, каждый из
+которых нацелен на определённую коллекцию документов.
 
-First, review the available collections (with a short description when available) to decide where to search.
+Сначала изучи доступные коллекции (с кратким описанием, если оно есть), чтобы решить, где искать.
 
-Available collections:
+Доступные коллекции:
 {collections}
 
-Then, for each piece of information needed, create a RouteStep with:
-- collection: the exact table name to search (must match available collections)
-- subquery: a focused search query for that specific piece
-- rationale: why this collection is relevant
+Затем для каждого нужного фрагмента информации создай RouteStep:
+- collection: точное имя таблицы для поиска (должно совпадать с одной из доступных коллекций)
+- subquery: сфокусированный поисковый запрос для этого фрагмента
+- rationale: почему эта коллекция релевантна
 
-User query: {query}
+Вопрос пользователя: {query}
 
-If the query needs information from multiple collections, create multiple steps.
-If the query can be answered from a single collection, create one step.
-If no collection is relevant to the query, return an empty steps list — the
-system will then honestly report it has nothing to answer from."""
+Если вопрос требует информации из нескольких коллекций — создай несколько шагов.
+Если на вопрос можно ответить по одной коллекции — создай один шаг.
+Если ни одна коллекция не релевантна вопросу — верни пустой список steps:
+система честно сообщит, что ей не из чего ответить."""
 
-PLANNER_ITERATION_PROMPT = """You are the Planner Agent of an Agentic RAG system.
+PLANNER_ITERATION_PROMPT = """Ты — Агент-Планировщик (Planner) в системе Agentic RAG.
 
-This is an ITERATION — earlier searches did not find everything needed. Re-route
-the search to the collection(s) most likely to hold the MISSING information.
+Это ИТЕРАЦИЯ — предыдущие поиски нашли не всё. Перенаправь поиск в ту коллекцию
+(или коллекции), где вероятнее всего находится НЕДОСТАЮЩАЯ информация.
 
-Original user question: {query}
-Still missing: {missing_parts}
-Feedback from the context checker: {feedback}
+Исходный вопрос пользователя: {query}
+Всё ещё не хватает: {missing_parts}
+Обратная связь от проверяющего контекст: {feedback}
 
-Available collections:
+Доступные коллекции:
 {collections}
 
-Already searched (did NOT yield the answer): {searched}
+Где уже искали (ответа это НЕ дало): {searched}
 
-For each collection that could plausibly contain a missing piece, create a RouteStep:
-- collection: the exact table name (must match available collections)
-- subquery: a focused query for the missing piece — use ALTERNATIVE keywords or a
-  different angle than what was already tried
-- rationale: why this collection might hold the missing piece
+Для каждой коллекции, которая правдоподобно может содержать недостающий фрагмент, создай RouteStep:
+- collection: точное имя таблицы (должно совпадать с одной из доступных)
+- subquery: сфокусированный запрос по недостающему фрагменту — используй
+  АЛЬТЕРНАТИВНЫЕ ключевые слова или другой угол, отличный от уже испробованного
+- rationale: почему эта коллекция может содержать недостающее
 
-Strongly PREFER collections that have NOT been searched yet — re-routing to an
-already-searched collection only makes sense with a genuinely different subquery.
-Prefer the 1-3 most relevant collections. If no collection looks relevant,
-return an empty steps list — the system will then honestly report it could not
-find the missing piece."""
+Уверенно ПРЕДПОЧИТАЙ коллекции, в которых ещё НЕ искали — возвращаться в уже
+обысканную коллекцию имеет смысл только с действительно другим подзапросом.
+Выбирай 1-3 самые релевантные коллекции. Если ни одна коллекция не выглядит
+релевантной — верни пустой список steps: система честно сообщит, что не смогла
+найти недостающее."""
 
 
 async def planner_node(
@@ -71,7 +71,7 @@ async def planner_node(
     if vdb_settings.descriptions_enabled:
         described = await list_collections_described(db_path)
         lines = [
-            f"- {c['collection']} — {c['description'] or '(no description)'}"
+            f"- {c['collection']} — {c['description'] or '(без описания)'}"
             for c in described
         ]
     else:
@@ -80,7 +80,7 @@ async def planner_node(
     collections_str = (
         "\n".join(lines)
         if lines
-        else "(no collections yet — index some documents first)"
+        else "(коллекций пока нет — сначала проиндексируйте документы)"
     )
 
     # Iteration mode: the Sufficient Context Agent sent us back to RE-ROUTE for
@@ -99,10 +99,10 @@ async def planner_node(
                 if r.get("collection")
             }
         )
-        searched_str = ", ".join(searched_cols) if searched_cols else "(none yet)"
+        searched_str = ", ".join(searched_cols) if searched_cols else "(пока нигде)"
         prompt = PLANNER_ITERATION_PROMPT.format(
             query=state["query"],
-            missing_parts=", ".join(state.get("missing_parts", [])) or "(unspecified)",
+            missing_parts=", ".join(state.get("missing_parts", [])) or "(не уточнено)",
             feedback=feedback,
             collections=collections_str,
             searched=searched_str,

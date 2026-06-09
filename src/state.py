@@ -49,9 +49,9 @@ class RouteStep(BaseModel):
     with the error and, if the model keeps failing, routes to give_up — the same
     strict path used for the scalar verdicts, rather than silently dropping steps.
     """
-    rationale: str = Field(description="Decide FIRST: why this collection is the right place to look for the needed piece.")
-    collection: str = Field(description="The collection/table name to search (must match an available collection), chosen per the rationale.")
-    subquery: str = Field(description="The focused thing to search for in that collection.")
+    rationale: str = Field(description="СНАЧАЛА реши: почему именно эта коллекция — правильное место для поиска нужного фрагмента.")
+    collection: str = Field(description="Имя коллекции/таблицы для поиска (должно совпадать с одной из доступных коллекций), выбранное согласно rationale.")
+    subquery: str = Field(description="Что конкретно искать в этой коллекции (сфокусированный подзапрос).")
 
     @field_validator("collection", "subquery")
     @classmethod
@@ -60,14 +60,14 @@ class RouteStep(BaseModel):
         # so a semantically-empty route fails validation instead of searching a
         # nonexistent "" collection.
         if not v or not v.strip():
-            raise ValueError("must be a non-empty string")
+            raise ValueError("поле должно быть непустой строкой")
         return v
 
 
 class PlanResult(BaseModel):
     """Planner output: breakdown of the query into search routes."""
-    is_multi_step: bool = Field(description="Whether this requires multiple search steps")
-    steps: list[RouteStep] = Field(description="Search routes to execute")
+    is_multi_step: bool = Field(description="Требует ли вопрос нескольких шагов поиска")
+    steps: list[RouteStep] = Field(description="Поисковые маршруты для выполнения")
 
     _coerce_steps = field_validator("steps", mode="before")(_coerce_list)
 
@@ -85,24 +85,24 @@ class SufficientContextResult(BaseModel):
     chosen after the verdict, not before it.
     """
     reason: str = Field(
-        description="Analysis FIRST: do the retrieved chunks contain a positive, substantive answer to every part of the question? State what is present and what is absent."
+        description="СНАЧАЛА анализ: содержат ли найденные фрагменты позитивный содержательный ответ на каждую часть вопроса? Укажи, что присутствует и что отсутствует."
     )
     draft_answer: str = Field(
         default="",
-        description="The best answer built ONLY from the retrieved context. If the context does not contain it, say so plainly — do not fill this in from general knowledge.",
+        description="Лучший ответ, построенный ТОЛЬКО из найденного контекста. Если в контексте ответа нет — прямо так и напиши; не заполняй это поле из общих знаний.",
     )
     missing_parts: list[str] = Field(
         default_factory=list,
-        description="Concrete pieces still missing. Empty if the draft already answers the question.",
+        description="Конкретные всё ещё недостающие фрагменты. Пусто, если черновик уже отвечает на вопрос.",
     )
 
     _coerce_missing = field_validator("missing_parts", mode="before")(_coerce_list)
     sufficient: bool = Field(
-        description="The VERDICT, decided after reason/draft/missing above. True ONLY if draft_answer is a positive, substantive answer grounded in the retrieved chunks. A 'not found / absent / not mentioned' draft is NOT sufficient — set False while any plausibly-relevant collection is still unsearched."
+        description="ВЕРДИКТ, выносится ПОСЛЕ reason/draft/missing выше. True ТОЛЬКО если draft_answer — позитивный содержательный ответ, опирающийся на найденные фрагменты. Черновик вида «не найдено / отсутствует / не упоминается» НЕ достаточен — ставь False, пока остаётся необысканная правдоподобно-релевантная коллекция."
     )
     feedback: str = Field(
         default="",
-        description="LAST: only when sufficient is False — specific next-search instructions chosen to fill the gap (what to look for and which collection).",
+        description="В САМОМ КОНЦЕ: только когда sufficient=False — конкретные указания для следующего поиска, закрывающие пробел (что искать и в какой коллекции).",
     )
 
     @model_validator(mode="after")
@@ -115,10 +115,11 @@ class SufficientContextResult(BaseModel):
         # schema violation; no separate retry mechanism.
         if not self.sufficient and not self.feedback.strip() and not self.missing_parts:
             raise ValueError(
-                "When sufficient is false you MUST provide missing_parts (the "
-                "concrete pieces still absent) and/or feedback (which collection "
-                "to search next and with what query). Otherwise set sufficient "
-                "to true if the retrieved context actually answers the question."
+                "Когда sufficient=false, ОБЯЗАТЕЛЬНО укажи missing_parts "
+                "(конкретные недостающие фрагменты) и/или feedback (в какой "
+                "коллекции искать дальше и с каким запросом). Иначе поставь "
+                "sufficient=true, если найденный контекст действительно "
+                "отвечает на вопрос."
             )
         return self
 

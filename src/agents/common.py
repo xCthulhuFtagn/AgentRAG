@@ -101,9 +101,9 @@ async def get_inventory_str(db_path: str | None) -> str:
     """
     described = await list_collections_described(db_path)
     if not described:
-        return "(knowledge base is empty — no collections indexed)"
+        return "(база знаний пуста — нет ни одной проиндексированной коллекции)"
     return "\n".join(
-        f"- {c['collection']} — {c['description'] or '(no description)'}"
+        f"- {c['collection']} — {c['description'] or '(без описания)'}"
         for c in described
     )
 
@@ -249,8 +249,8 @@ async def generate_structured(schema, prompt: str, *, temperature: float = 0.0):
                     f"response after {retries + 1} attempt(s) — {type(e).__name__}: {e}"
                 ) from e
             current = (
-                f"{prompt}\n\nYour previous response failed:\n{e}\n\n"
-                "Return a corrected response — call the function with every "
-                "required field present, correctly typed, and satisfying the "
-                "field rules described in the schema."
+                f"{prompt}\n\nТвой предыдущий ответ не прошёл проверку:\n{e}\n\n"
+                "Верни исправленный ответ — вызови функцию так, чтобы каждое "
+                "обязательное поле присутствовало, имело правильный тип и "
+                "удовлетворяло правилам, описанным в схеме."
             )
