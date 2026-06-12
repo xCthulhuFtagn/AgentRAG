@@ -67,6 +67,40 @@ def test_sufficient_true_needs_no_feedback():
     assert result.sufficient is True
 
 
+def test_conditional_fields_are_required():
+    # No defaults on purpose: a weak GigaChat omits non-required keys outright
+    # (observed: a False verdict with no feedback key at all). With a default,
+    # the omission silently becomes "" and the run dies in the validator after
+    # burning retries; required keys never go missing in the first place.
+    for field in ("draft_answer", "missing_parts", "feedback"):
+        fields = judge_fields()
+        del fields[field]
+        with pytest.raises(ValidationError):
+            SufficientContextResult(**fields)
+
+
+def test_gigachat_schema_requires_every_field():
+    # langchain-gigachat's converter silently drops Optional[...] fields from
+    # the function schema's `required` list — flat required types are the only
+    # shape whose requiredness reaches the model. Pin the full required list
+    # exactly as GigaChat will see it.
+    from langchain_gigachat.utils.function_calling import (
+        convert_to_gigachat_function,
+    )
+
+    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    converted = convert_to_gigachat_function(schema)
+    converted = converted if isinstance(converted, dict) else converted.dict()
+    assert set(converted["parameters"]["required"]) == {
+        "question_verbatim",
+        "reason",
+        "draft_answer",
+        "missing_parts",
+        "sufficient",
+        "feedback",
+    }
+
+
 def test_insufficient_without_feedback_is_rejected():
     # missing_parts alone is not enough: the Planner routes on feedback, and
     # an empty feedback at False would silently demote it to initial-plan mode
