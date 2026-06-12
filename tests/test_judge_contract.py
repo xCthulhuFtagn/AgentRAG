@@ -83,10 +83,11 @@ def test_gigachat_schema_requires_every_field():
     # langchain-gigachat's converter silently drops Optional[...] fields from
     # the function schema's `required` list — flat required types are the only
     # shape whose requiredness reaches the model. Pin the full required list
-    # exactly as GigaChat will see it.
-    from langchain_gigachat.utils.function_calling import (
-        convert_to_gigachat_function,
-    )
+    # exactly as GigaChat will see it. importorskip: on the DeepSeek branch
+    # langchain-gigachat isn't a pinned dependency — the pydantic-level
+    # requiredness is still covered by test_conditional_fields_are_required.
+    fc = pytest.importorskip("langchain_gigachat.utils.function_calling")
+    convert_to_gigachat_function = fc.convert_to_gigachat_function
 
     schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
     converted = convert_to_gigachat_function(schema)
