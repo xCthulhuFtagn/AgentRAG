@@ -26,7 +26,7 @@ from src.vectordb.config import vdb_settings
 from src.vectordb.embeddings import embed_batch
 from src.vectordb.client import get_sync_db
 from src.vectordb.describe import describe_document
-from src.vectordb.descriptions import save_descriptions
+from src.vectordb.descriptions import load_descriptions, save_descriptions
 
 # Rich document formats parsed by LiteParse.
 DOC_SUFFIXES = {".pdf", ".docx", ".pptx"}
@@ -140,12 +140,62 @@ def split_text(
     return [c.strip() for c in splitter.split_text(clean_text(text)) if c.strip()]
 
 
+def _sync_table_names(db) -> list[str]:
+    """Walk sync LanceDB's paginated table listing into a flat list of names.
+
+    Mirrors `_list_table_names` in tools.py (async side): list_tables() —
+    table_names() is deprecated — returns a paginated ListTablesResponse.
+    """
+    names: list[str] = []
+    page_token = None
+    while True:
+        resp = db.list_tables(page_token=page_token)
+        names.extend(resp.tables)
+        page_token = resp.page_token
+        if not page_token:
+            break
+    return names
+
+
+# The subset of project settings that shapes the stored vectors — changing any
+# of these invalidates existing chunks, so applying them requires a full
+# reindex. The stitching keys below are search-time and apply on the next query.
+INDEX_TIME_KEYS = (
+    "chunk_size", "chunk_overlap", "descriptions_enabled", "describe_max_chars"
+)
+
+
+def resolve_index_settings(overrides: dict | None = None) -> dict:
+    """Per-corpus vector-DB hyperparameters with overrides applied.
+
+    The knobs a caller may tune per corpus (the web UI stores them per
+    project): four index-time ones (INDEX_TIME_KEYS — consumed by
+    `index_files`) plus the two neighbor-stitching ones (`expand_padding`,
+    `bridge_gap` — search-time, threaded into `gather_neighbors` via graph
+    state). Any key absent or None falls back to the global `vdb_settings`
+    (.env) value — so the .env values are the defaults.
+    """
+    resolved = {
+        "chunk_size": vdb_settings.chunk_size,
+        "chunk_overlap": vdb_settings.chunk_overlap,
+        "descriptions_enabled": vdb_settings.descriptions_enabled,
+        "describe_max_chars": vdb_settings.describe_max_chars,
+        "expand_padding": vdb_settings.expand_padding,
+        "bridge_gap": vdb_settings.bridge_gap,
+    }
+    for key, value in (overrides or {}).items():
+        if key in resolved and value is not None:
+            resolved[key] = value
+    return resolved
+
+
 async def index_documents(
     docs_dir: str,
     db_path: str = vdb_settings.lance_db_path,
     progress_cb: Callable[[str, bool], None] | None = None,
+    settings: dict | None = None,
 ):
-    """Index all documents from a directory into LanceDB.
+    """Index all documents from a directory into LanceDB (a from-scratch run).
 
     Each file becomes a separate LanceDB collection (table). `progress_cb`, if
     given, is called `(filename, ok)` once each file finishes — ok=False when it
@@ -157,7 +207,6 @@ async def index_documents(
         print(f"Error: directory '{docs_dir}' does not exist")
         sys.exit(1)
 
-    db = get_sync_db(db_path)
     files = [f for f in docs_path.glob("*.*") if f.suffix.lower() in SUPPORTED_SUFFIXES]
 
     if not files:
@@ -166,9 +215,44 @@ async def index_documents(
         return
 
     print(f"Found {len(files)} file(s) to index\n")
+    await index_files(files, db_path, progress_cb, fresh=True, settings=settings)
 
-    used: set[str] = set()
-    descriptions: dict[str, dict] = {}  # table_name -> {file, description}
+
+async def index_files(
+    files: list[Path],
+    db_path: str = vdb_settings.lance_db_path,
+    progress_cb: Callable[[str, bool], None] | None = None,
+    *,
+    fresh: bool = False,
+    settings: dict | None = None,
+):
+    """Index the given files into LanceDB, one table per file.
+
+    fresh=True — a from-scratch run: starts an empty descriptions sidecar and
+    assumes the caller owns the whole DB (full reindex / CLI). fresh=False —
+    incremental: tables of files NOT in `files` stay untouched; each given
+    file's previous table (located via the sidecar's file→table mapping, with
+    a `safe_table_name` fallback for sidecar-less legacy tables) is dropped
+    up front so the index always reflects the file's current content, and the
+    sidecar is merged, not overwritten.
+    """
+    cfg = resolve_index_settings(settings)
+    db = get_sync_db(db_path)
+
+    if fresh:
+        used: set[str] = set()
+        descriptions: dict[str, dict] = {}  # table_name -> {file, description}
+    else:
+        descriptions = load_descriptions(db_path)
+        used = set(await asyncio.to_thread(_sync_table_names, db))
+        by_file = {info.get("file"): tbl for tbl, info in descriptions.items()}
+        for file_path in files:
+            old = by_file.get(file_path.name, safe_table_name(file_path.stem))
+            if old in used or old in descriptions:
+                await asyncio.to_thread(db.drop_table, old, ignore_missing=True)
+                used.discard(old)
+                descriptions.pop(old, None)
+
     for file_path in files:
         base = safe_table_name(file_path.stem)
         table_name = base
@@ -196,15 +280,17 @@ async def index_documents(
                 progress_cb(file_path.name, False)
             continue
 
-        chunks = await asyncio.to_thread(split_text, text)
+        chunks = await asyncio.to_thread(
+            split_text, text, cfg["chunk_size"], cfg["chunk_overlap"]
+        )
         print(f"    {len(chunks)} chunks, embedding...")
 
         # Embedding and the (optional) LLM description are independent given the
         # text — run them concurrently so the description adds little wall-clock.
-        if vdb_settings.descriptions_enabled:
+        if cfg["descriptions_enabled"]:
             embeddings, description = await asyncio.gather(
                 embed_batch(chunks),
-                describe_document(text),
+                describe_document(text, cfg["describe_max_chars"]),
             )
         else:
             embeddings = await embed_batch(chunks)
@@ -232,6 +318,28 @@ async def index_documents(
     # Persist per-file descriptions next to the DB for the Planner to read.
     save_descriptions(db_path, descriptions)
     print(f"\nIndexing complete. DB at: {db_path}")
+
+
+async def remove_files_from_index(
+    file_names: list[str],
+    db_path: str = vdb_settings.lance_db_path,
+) -> None:
+    """Drop the tables (and sidecar entries) backing the given uploaded files.
+
+    Table ownership comes from the descriptions sidecar (file → table); a
+    sidecar-less legacy table falls back to `safe_table_name(stem)`. Missing
+    tables are ignored — removing an unindexed file is a no-op.
+    """
+    if not file_names:
+        return
+    db = get_sync_db(db_path)
+    descriptions = load_descriptions(db_path)
+    by_file = {info.get("file"): tbl for tbl, info in descriptions.items()}
+    for name in file_names:
+        table = by_file.get(name, safe_table_name(Path(name).stem))
+        await asyncio.to_thread(db.drop_table, table, ignore_missing=True)
+        descriptions.pop(table, None)
+    save_descriptions(db_path, descriptions)
 
 
 def main():

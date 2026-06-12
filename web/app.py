@@ -13,10 +13,10 @@ from pathlib import Path
 from nicegui import ui, events
 
 from src.logging_setup import setup_logging
-from src.vectordb.indexer import SUPPORTED_SUFFIXES
+from src.vectordb.indexer import INDEX_TIME_KEYS, SUPPORTED_SUFFIXES
 from web import runtime
 from web.chat import run_chat
-from web.indexing import reindex_project
+from web.indexing import reindex_project, update_project_index
 
 setup_logging()  # node decisions → console, same logs as the CLI
 
@@ -73,6 +73,10 @@ def index():
                 ).on("click", lambda _=None, x=pid: open_project(x))
                 with ui.button(icon="more_vert").props("flat dense round"):
                     with ui.menu():
+                        ui.menu_item(
+                            "Indexing settings",
+                            lambda x=pid: index_settings_dialog(x),
+                        )
                         ui.menu_item("Open", lambda x=pid: open_project(x))
                         ui.menu_item(
                             "Rename",
@@ -191,7 +195,7 @@ def index():
         with ui.row().classes("w-full no-wrap gap-2"):
             ui.button("Cancel", on_click=lambda _=None: cancel_edit()).props("flat")
             ui.button(
-                "Done & reindex", icon="check",
+                "Done & update index", icon="check",
                 on_click=lambda _=None: commit_edit(),
             ).props("color=primary").classes("grow")
 
@@ -356,6 +360,115 @@ def index():
             files_panel.refresh()
             chat_panel.refresh()
 
+    async def index_settings_dialog(pid):
+        meta = STORE.get(pid)
+        if not meta:
+            return
+        current = STORE.get_index_settings(pid)
+        with ui.dialog() as dialog, ui.card().classes("settings-card w-96"):
+            ui.label("Indexing settings").classes("font-bold text-green-800")
+            ui.label(f"Project — {meta['name']}").classes("text-sm text-gray-500")
+
+            ui.label("Chunking & descriptions — applying triggers a full reindex").classes(
+                "text-xs font-medium text-green-700 mt-1"
+            )
+            chunk_size = ui.number(
+                "Chunk size (chars)",
+                value=current["chunk_size"], min=100, max=8000, step=50, precision=0,
+            ).classes("w-full")
+            chunk_overlap = ui.number(
+                "Chunk overlap (chars)",
+                value=current["chunk_overlap"], min=0, max=4000, step=10, precision=0,
+            ).classes("w-full")
+            descriptions = ui.switch(
+                "LLM file descriptions (used for search routing)",
+                value=current["descriptions_enabled"],
+            )
+            describe_chars = ui.number(
+                "Description excerpt (chars sent to the LLM)",
+                value=current["describe_max_chars"],
+                min=500, max=50000, step=500, precision=0,
+            ).classes("w-full")
+            describe_chars.bind_enabled_from(descriptions, "value")
+
+            ui.label("Neighbor stitching — applies to the next search, no reindex").classes(
+                "text-xs font-medium text-green-700 mt-2"
+            )
+            expand_padding = ui.number(
+                "Stitch padding (chunks pulled around each hit)",
+                value=current["expand_padding"], min=0, max=10, step=1, precision=0,
+            ).classes("w-full")
+            bridge_gap = ui.number(
+                "Merge gap (max chunks between windows to bridge)",
+                value=current["bridge_gap"], min=0, max=20, step=1, precision=0,
+            ).classes("w-full")
+
+            def collect() -> dict:
+                return {
+                    "chunk_size": int(chunk_size.value or current["chunk_size"]),
+                    "chunk_overlap": int(chunk_overlap.value or 0),
+                    "descriptions_enabled": bool(descriptions.value),
+                    "describe_max_chars": int(
+                        describe_chars.value or current["describe_max_chars"]
+                    ),
+                    "expand_padding": int(
+                        current["expand_padding"]
+                        if expand_padding.value is None else expand_padding.value
+                    ),
+                    "bridge_gap": int(
+                        current["bridge_gap"]
+                        if bridge_gap.value is None else bridge_gap.value
+                    ),
+                }
+
+            def needs_reindex(vals: dict) -> bool:
+                # Only the index-time knobs invalidate stored chunks; the
+                # stitching ones are read at search time.
+                return any(vals[k] != current[k] for k in INDEX_TIME_KEYS)
+
+            def apply():
+                vals = collect()
+                if vals["chunk_overlap"] >= vals["chunk_size"]:
+                    ui.notify(
+                        "Chunk overlap must be smaller than chunk size",
+                        color="negative",
+                    )
+                    return
+                dialog.submit(vals)
+
+            with ui.row().classes("w-full justify-end items-center"):
+                ui.button("Close", on_click=lambda: dialog.submit(None)).props("flat")
+                apply_btn = (
+                    ui.button("Apply — full reindex", on_click=apply)
+                    .props("color=red")
+                )
+            # Hidden until the first change — closing an untouched dialog is a
+            # plain cancel; reverting every field hides it again. The label
+            # tells the truth about the cost: stitching-only changes don't
+            # rebuild anything.
+            apply_btn.set_visibility(False)
+
+            def on_change(_=None):
+                vals = collect()
+                apply_btn.set_visibility(vals != current)
+                apply_btn.set_text(
+                    "Apply — full reindex" if needs_reindex(vals) else "Apply"
+                )
+
+            for el in (chunk_size, chunk_overlap, descriptions, describe_chars,
+                       expand_padding, bridge_gap):
+                el.on_value_change(on_change)
+
+        result = await dialog
+        if not result or result == current:
+            return
+        STORE.set_index_settings(pid, result)
+        if needs_reindex(result):
+            ui.notify("Settings saved — rebuilding the index…", color="positive")
+            await trigger_reindex(pid)
+        else:
+            ui.notify("Settings saved — applied from the next search", color="positive")
+
     async def trigger_reindex(pid):
         # Show frozen UI immediately, then reindex, then unfreeze.
         runtime.set_status(pid, "reindexing")
@@ -363,6 +476,17 @@ def index():
         files_panel.refresh()
         chat_panel.refresh()
         await reindex_project(pid)
+        projects_list.refresh()
+        files_panel.refresh()
+        chat_panel.refresh()
+
+    async def trigger_update(pid, added, removed):
+        # Incremental variant of trigger_reindex — only the file delta is indexed.
+        runtime.set_status(pid, "reindexing")
+        projects_list.refresh()
+        files_panel.refresh()
+        chat_panel.refresh()
+        await update_project_index(pid, added, removed)
         projects_list.refresh()
         files_panel.refresh()
         chat_panel.refresh()
@@ -455,29 +579,48 @@ def index():
 
     async def commit_edit():
         pid = ctx["edit"]["pid"]
-        # Build the final {name: bytes} set from the staged entries.
+        # Build the final {name: bytes} set from the staged entries, plus the
+        # delta vs. disk — only changed files get (re)indexed, the rest keep
+        # their existing tables.
         final: dict[str, bytes] = {}
+        added: list[str] = []    # new uploads, replacements, rename targets
+        removed: list[str] = []  # deletions, rename sources
         for s in ctx["edit"]["files"]:
             if s["deleted"]:
+                if s["origin"] == "disk":
+                    removed.append(s["orig_name"])
                 continue
             name = s["name"]
             if name in final:
                 ui.notify(f"Duplicate filename: {name}", color="negative")
                 return
-            final[name] = (
-                s["content"] if s["origin"] == "new"
-                else STORE.read_file(pid, s["orig_name"])
-            )
+            if s["origin"] == "new":
+                final[name] = s["content"]
+                added.append(name)
+            else:
+                final[name] = STORE.read_file(pid, s["orig_name"])
+                if name != s["orig_name"]:  # renamed → new table name
+                    removed.append(s["orig_name"])
+                    added.append(name)
+        if not added and not removed:
+            ctx["edit"] = None
+            files_panel.refresh()
+            ui.notify("No changes")
+            return
         try:
             STORE.replace_all_files(pid, final)
         except (ValueError, OSError) as ex:
             ui.notify(str(ex), color="negative")
             return
         ctx["edit"] = None
-        # Notify before trigger_reindex: it refreshes files_panel, which deletes
+        # Notify before trigger_update: it refreshes files_panel, which deletes
         # this handler's slot — any ui.* call after that would crash.
-        ui.notify("Files saved — reindexing…", color="positive")
-        await trigger_reindex(pid)
+        ui.notify(
+            f"Files saved — indexing {len(added)} changed file(s)…"
+            if added else "Files saved — updating index…",
+            color="positive",
+        )
+        await trigger_update(pid, added, removed)
 
     async def send_message(inp):
         pid = ctx["chat_pid"]

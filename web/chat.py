@@ -21,7 +21,17 @@ from web import runtime
 async def run_chat(project_id: str, query: str) -> AsyncIterator[tuple[str, object]]:
     """Stream agent steps and the final answer for a query in a project."""
     db_path = runtime.STORE.db_path(project_id)
-    initial = make_initial_state(query=query, db_path=db_path)
+    settings = runtime.STORE.get_index_settings(project_id)
+    initial = make_initial_state(
+        query=query,
+        db_path=db_path,
+        # Search-time knobs from the project's indexing settings — applied per
+        # query, no reindex needed.
+        stitch_settings={
+            "expand_padding": settings["expand_padding"],
+            "bridge_gap": settings["bridge_gap"],
+        },
+    )
 
     # Fresh thread per message — independent run, no state bleed.
     thread_id = f"{project_id}-{uuid.uuid4().hex}"

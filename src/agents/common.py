@@ -88,7 +88,26 @@ class _TokenUsageHandler(AsyncCallbackHandler):
 _token_handler = _TokenUsageHandler()
 
 
-async def get_inventory_str(db_path: str | None) -> str:
+def format_inventory(described: list[dict], *, backtick_names: bool = False) -> str:
+    """Render [{collection, description}] as the inventory block for prompts.
+
+    backtick_names wraps each collection name in `…` — for Synthesis, whose
+    output the web UI renders as markdown: a bare table name like
+    07_Rodnaya_literatura gets its underscores eaten as italics. The model
+    mirrors the formatting it sees, so the prompt shows names pre-backticked.
+    The judge/planner prompts keep bare names (the planner must emit the exact
+    table name in RouteStep.collection — backticks there would corrupt it).
+    """
+    if not described:
+        return "(база знаний пуста — нет ни одной проиндексированной коллекции)"
+    lines = []
+    for c in described:
+        name = f"`{c['collection']}`" if backtick_names else c["collection"]
+        lines.append(f"- {name} — {c['description'] or '(без описания)'}")
+    return "\n".join(lines)
+
+
+async def get_inventory_str(db_path: str | None, *, backtick_names: bool = False) -> str:
     """The full corpus inventory — every collection plus its description.
 
     Ground truth for "what's in the knowledge base": the complete list of
@@ -100,12 +119,125 @@ async def get_inventory_str(db_path: str | None) -> str:
     to Synthesis so it can describe each file from its summary.
     """
     described = await list_collections_described(db_path)
-    if not described:
-        return "(база знаний пуста — нет ни одной проиндексированной коллекции)"
-    return "\n".join(
-        f"- {c['collection']} — {c['description'] or '(без описания)'}"
-        for c in described
-    )
+    return format_inventory(described, backtick_names=backtick_names)
+
+
+# ── Mechanical search statistics ─────────────────────────────────────────────
+# Everything below is computed by code from the accumulated search_results —
+# the model only reads it. A weak model cannot reliably reconstruct "what has
+# been searched" from collection tags scattered across ~tens of kB of chunks
+# (it hallucinates "not searched yet" for a collection searched on iteration 1),
+# so the searched set, the last-search novelty delta and the coverage fraction
+# are handed to it as ground truth. Split along the judge/planner contract:
+# the judge gets searched× + last-search delta (an exhaustion detector — +0 new
+# chunks = diminishing returns); the planner gets coverage K/N (a routing
+# signal, never a verdict criterion — a low percentage must not read as
+# "insufficient", vector search retrieves what's relevant, not everything).
+
+def collection_search_stats(search_results: list[dict]) -> dict[str, dict]:
+    """Per-collection statistics over every search actually executed.
+
+    Walks the accumulated entries in execution order (entries that errored are
+    not searches and are skipped; empty results count — an empty search is the
+    strongest exhaustion signal). Returns an insertion-ordered
+    {collection: {searches, queries, retrieved, last_new, seqs_known}} where
+    `queries` lists the executed search queries in order (deduped — repeats
+    are the angle-starvation signal the judge/rewriter must see), `retrieved`
+    is the set of distinct chunk seqs seen so far, `last_new` is how many
+    chunks of the LAST search were new vs all earlier searches of the same
+    collection, and `seqs_known=False` marks legacy tables without a seq
+    column (novelty can't be deduplicated → last_new=None, coverage omitted).
+    """
+    stats: dict[str, dict] = {}
+    for r in search_results:
+        collection = r.get("collection")
+        if not collection or r.get("error"):
+            continue
+        st = stats.setdefault(
+            collection,
+            {
+                "searches": 0,
+                "queries": [],
+                "retrieved": set(),
+                "last_new": None,
+                "seqs_known": True,
+            },
+        )
+        st["searches"] += 1
+        query = (r.get("subquery") or "").strip()
+        if query and query not in st["queries"]:
+            st["queries"].append(query)
+        chunks = r.get("chunks") or []
+        seqs = {s for s in (r.get("seqs") or []) if s is not None}
+        if chunks and not seqs:
+            st["seqs_known"] = False
+            st["last_new"] = None
+            continue
+        new = seqs - st["retrieved"]
+        st["last_new"] = len(new)
+        st["retrieved"] |= new
+    return stats
+
+
+def _ru_times(n: int) -> str:
+    """«1 раз», «2 раза», «5 раз» — searches counter."""
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"{n} раза"
+    return f"{n} раз"
+
+
+def _ru_new_chunks(n: int) -> str:
+    """«+1 новый чанк», «+3 новых чанка», «+0 новых чанков» — novelty delta."""
+    if n % 10 == 1 and n % 100 != 11:
+        return f"+{n} новый чанк"
+    if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14):
+        return f"+{n} новых чанка"
+    return f"+{n} новых чанков"
+
+
+def format_search_stats_for_judge(stats: dict[str, dict]) -> str:
+    """The judge's view: searched collections, novelty delta, executed queries.
+
+    The queries ground the judge's "is there an untried angle?" call and keep
+    its «альтернативные формулировки» from repeating what was already tried.
+    """
+    if not stats:
+        return "(поисков ещё не было)"
+    lines = []
+    for collection, st in stats.items():
+        line = f"- {collection}: обыскана {_ru_times(st['searches'])}"
+        if st["last_new"] is not None:
+            line += f", последний поиск дал {_ru_new_chunks(st['last_new'])}"
+        if st["queries"]:
+            line += "\n  выполненные запросы: " + "; ".join(
+                f"«{q}»" for q in st["queries"]
+            )
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def format_search_stats_for_planner(
+    stats: dict[str, dict], totals: dict[str, int | None]
+) -> str:
+    """The planner's view: searches, coverage «извлечено K/N (P%)», novelty delta.
+
+    The delta is the planner's stop signal — «+0 новых» says a repeat visit
+    with similar wording is wasted; coverage alone misleads (a weak model reads
+    low coverage as "barely explored → dig the same spot again").
+    """
+    if not stats:
+        return "(пока нигде)"
+    lines = []
+    for collection, st in stats.items():
+        line = f"- {collection}: обыскана {_ru_times(st['searches'])}"
+        total = totals.get(collection)
+        if total and st["seqs_known"]:
+            k = len(st["retrieved"])
+            line += f", извлечено {k}/{total} чанков ({round(100 * k / total)}%)"
+        if st["last_new"] is not None:
+            line += f", последний поиск дал {_ru_new_chunks(st['last_new'])}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def logged_node(fn):

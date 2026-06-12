@@ -9,14 +9,16 @@ Implementation of Google Research's [Agentic RAG](https://research.google/blog/u
 Fully edgeless LangGraph graph — zero `add_edge` calls, all routing via `Command(goto=...)`.
 
 **Pure RAG — single functionality.** Every query goes through retrieval: no
-orchestrator / complexity gate (no answering without searching) and no fallbacks
-(no broad search-all, no general-knowledge answer). If nothing in the corpus is
-relevant, the system refuses honestly via Give Up.
+orchestrator / complexity gate (no answering without searching) and no
+general-knowledge fallback. Refusals are honest **and evidence-based**: a claim
+of absence requires an actual search, so an implausible-looking corpus gets
+probed rather than refused — Give Up without a single search happens only when
+the knowledge base is empty.
 
 ```
       planner ◄── entry_point ◄────────────────────┐
         │                                          │
-        ├─ no relevant collection:                 │
+        ├─ empty KB / iteration exhausted:         │
         │    Command(goto="give_up") → END          │
         │ Command(goto="query_rewriter")            │
         ▼                                          │
@@ -40,18 +42,21 @@ relevant, the system refuses honestly via Give Up.
 
 On iteration the loop re-enters at the **Planner**, which re-routes to the
 collection(s) most likely to hold the missing piece (mirrors Google RAG
-Engine's loop that re-enters before its Search Plan agent). If the Planner
-finds no relevant route — initial turn or iteration — it goes straight to
-**Give Up** (no broad fallback).
+Engine's loop that re-enters before its Search Plan agent). On the initial
+turn the Planner never refuses a non-empty corpus unsearched — descriptions
+can't prove absence, so it probes the least-implausible collections and lets
+the judge rule on the actual retrieval. It goes straight to **Give Up** only
+with an empty knowledge base, or on iteration when every plausible collection
+is searched to exhaustion.
 
 ### 6 agents
 
 | Agent | Role |
 |-------|------|
-| **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; no relevant collection → Give Up |
+| **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; probes the least-implausible collections when nothing looks relevant (absence needs search evidence); Give Up only on an empty KB or iteration exhaustion |
 | **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); one search task per route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
-| **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step; also gets the full corpus inventory (ground truth) so it can confirm completeness on "describe all files" queries |
+| **Sufficient Context** | Decides ONE thing: *would another search of the corpus materially improve the answer to the question as asked?* Answer found — sufficient; corpus exhausted on the topic — also sufficient (the answer states what the sources contain, even if thin); zero findings — never. Copies the question verbatim first (anti-inflation anchor), describes any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); reads the inventory + code-computed search statistics |
 | **Synthesis** | Generates final answer with source citations; can describe every document from the inventory + retrieved chunks |
 | **Give Up** | System-generated refusal when context is exhausted; no LLM call |
 
@@ -110,8 +115,9 @@ needed. PaddleOCR (`ocr/paddleocr`, `:8829`) works the same way — just change 
 A Python-only UI: **projects on the left, chat on the right**.
 
 - Create / rename / delete / open projects (green theme).
-- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & reindex** applies everything at once (one reindex); **Cancel** discards.
-- That single reindex **freezes** the chat (turns blue, trembles, snows ❄) until it finishes — sending is blocked, but you can still open/return to the frozen chat to watch it. The freeze tracks the project's reindex status live, so switching chats and back keeps it correct.
+- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & update index** applies everything at once and indexes **only the delta**: new/replaced/renamed files are (re)indexed, deleted files' tables are dropped, untouched files keep their existing tables; **Cancel** discards.
+- **Indexing settings** (first item in a project's ⋮ menu) opens a dialog with the project's vector-DB hyperparameters: chunk size, chunk overlap, LLM file descriptions on/off, description excerpt size (index-time), plus the two neighbor-stitching knobs — stitch padding and merge gap (search-time). Global `.env` values are the defaults; saved per project in its `meta.json`. On the first change a red **Apply** button appears; it is honest about cost: if any *index-time* value changed it reads **Apply — full reindex** and rebuilds the whole project index (old chunks were cut with the old settings), while a stitching-only change just saves and applies from the next search — no reindex. Closing without changes does nothing.
+- Indexing **freezes** the chat (turns blue, trembles, snows ❄) until it finishes — sending is blocked, but you can still open/return to the frozen chat to watch it. The freeze tracks the project's reindex status live, so switching chats and back keeps it correct.
 - Chat streams the **live agent trace** (planner → rewrite → search → sufficient) then the final answer.
 - Projects are **isolated** — each has its own LanceDB, so search never leaks across projects.
 
@@ -133,24 +139,27 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 ├── app.py                #   ui.run(root=index): projects + chat, green theme, frozen-chat CSS
 ├── projects.py           #   ProjectStore — filesystem CRUD (data/projects, data/lancedb)
 ├── runtime.py            #   GRAPH (built once), STORE, per-project status + locks
-├── indexing.py           #   reindex_project() — wipe + rebuild project DB
+├── indexing.py           #   reindex_project() — wipe + rebuild; update_project_index() — incremental delta
 ├── chat.py               #   run_chat() — streams astream events, fresh thread per message
 └── static/style.css      #   green theme + .frozen (blue + tremble)
 ```
 
 ## How the iteration loop works
 
-1. Sufficient Context Agent checks three things:
-   - **Retrieved snippets** — do they contain the needed facts?
-   - **Draft answer** — can we construct a complete answer?
-   - **Missing pieces** — *what exactly* is missing and *where* to find it
-2. If insufficient + iterations left → returns `Command(goto="planner")` with `feedback="search for X in Y"` and `missing_parts`
-3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter. If it finds no relevant route, the Query Rewriter falls back to one targeted query across all collections
+1. Sufficient Context Agent decides **one question**: *would one more search of the corpus materially improve the answer to the question as asked?* It is a retrieval-state call, not a grade against an ideal answer:
+   - **Answer found** → sufficient (don't keep searching for "more details" the user never asked for; the schema's first field is a verbatim copy of the question — a copy-not-generate anchor against question inflation)
+   - **Corpus exhausted on the topic** (every plausible collection searched to diminishing returns) → also sufficient: *"the sources contain only …"* is the system's honest answer, even if the findings are thin
+   - **Zero findings** → never sufficient; once no routes remain, the system refuses honestly
+   - **Concrete reason to expect more** (an unsearched plausible collection, an untried search angle) → insufficient, with the **information gap** described: *what fact* is missing, *what was found instead*, *what alternative phrasings* might name it
+2. If insufficient + iterations left → returns `Command(goto="planner")` with `missing_parts` and `feedback` describing the gap (recommended form: *«Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….»*) — pure information language. Naming a collection ("search in Y") is a **validation error**: the judge says *what* is missing, the Planner decides *where* to look (separation of concerns, enforced by schema + re-prompt)
+3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter — which is shown the queries already executed against each collection, so iteration rewrites stop converging to the same bag of words. When every plausible collection is already exhausted, the Planner returns empty steps and goes straight to Give Up (pure RAG — no general-knowledge fallback)
 4. Search Fanout searches again → Sufficient Context checks again
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
-6. Give Up node builds an honest refusal: what was found, what's missing, why
+6. Give Up node builds an honest refusal: what was searched, what was found, what's missing, why
 
-The Sufficient Context Agent also receives the **complete corpus inventory** (every collection + its description) as ground truth. Without it, "describe all the files in the knowledge base"-type queries could never satisfy the judge — vector search returns similar chunks but never proves it has seen *every* document, so the loop always ran to `give_up`. With the inventory the judge can confirm full coverage and Synthesis can describe each document from its summary.
+Both loop participants read **mechanical search statistics** computed by code from the record of executed searches (empty searches are recorded too — never reconstructed by the model from chunk tags, which weak models hallucinate about): the judge sees the searched set, the last-search novelty delta (*«обыскана 3 раза, последний поиск дал +0 новых чанков»* — a diminishing-returns exhaustion signal) and the executed queries (grounding its "untried angle" call); the Planner sees per-collection coverage (*«извлечено 28/210 чанков (13%)»*) plus the same delta as its stop signal — low coverage explicitly does **not** mean "barely explored": a similar query just re-returns the same top chunks.
+
+The Sufficient Context Agent also receives the **complete corpus inventory** (every collection + its description) as ground truth. Without it, "describe all the files in the knowledge base"-type queries could never satisfy the judge — vector search returns similar chunks but never proves it has seen *every* document, so the loop always ran to `give_up`. With the inventory the judge can confirm full coverage, and for specific questions a *negative* answer only becomes final once every plausibly-relevant collection has actually been searched. Synthesis uses the same inventory to describe each document from its summary.
 
 ## Vector store (LanceDB)
 
@@ -173,7 +182,8 @@ data/
 │   └── {table}.lance/              # one table (Lance dataset) per file
 │       ├── data/ … (columnar fragments: text + 384-d vector)
 │       └── _versions, _transactions  # Lance manifest (versioned, ACID)
-└── lancedb/_cli/                   # CLI default (LANCE_DB_PATH) — same data/ root
+├── lancedb/_cli/                   # CLI default (LANCE_DB_PATH) — same data/ root
+└── fastembed_cache/                # embedding model (ONNX, ~252MB), downloaded once
 ```
 Everything lives under `data/` (created automatically). The CLI's global DB is just another dir under `data/lancedb/` (`_cli`), kept apart from per-project DBs whose names are project UUIDs.
 
@@ -186,7 +196,8 @@ Everything lives under `data/` (created automatically). The CLI's global DB is j
 
 ### Reindexing & persistence
 
-- Editing a project's files commits a batch, then **reindexes**: the project's `data/lancedb/{id}` dir is wiped and rebuilt from the current files ([indexing.py](web/indexing.py)). This keeps the index consistent with deletes/renames. Each table is also `drop_table`-then-`create_table` on every run.
+- Editing a project's files commits a batch, then indexes **only the delta** ([indexing.py](web/indexing.py)): added/replaced/renamed files get their tables rebuilt (`index_files`, incremental — the file's previous table is found via the descriptions sidecar and dropped first), deleted files' tables are dropped (`remove_files_from_index`), and untouched files are never re-embedded. The descriptions sidecar is merged, not overwritten.
+- A **full** wipe-and-rebuild of `data/lancedb/{id}` still happens when the project's *index-time* settings change (old chunks were cut with the old settings) — the *Apply* button in the Indexing-settings dialog. Stitching-only changes skip the rebuild: they're read at search time.
 - Data persists between runs — restart the app/CLI and the tables are still there. Deleting a project removes both its files and its LanceDB dir.
 
 ## Configuration
@@ -214,9 +225,11 @@ MAX_ITERATIONS=3                             # max search→check retries before
 # ── Vector DB (vdb_settings) ──
 LANCE_DB_PATH=./data/lancedb/_cli            # CLI/global DB dir (web overrides per project)
 EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2   # ⚠ multilingual (RU+), 384d; changing model → full reindex
+EMBEDDING_CACHE_DIR=./data/fastembed_cache   # where the ~252MB ONNX model lives (FastEmbed's default /tmp is wiped on reboot)
 CHUNK_SIZE=1000                              # chunk target, chars (new docs only)
 CHUNK_OVERLAP=150                            # chunk overlap, chars
 DESCRIPTIONS_ENABLED=true                    # LLM file summary at index time; Planner routes with it
+DESCRIBE_MAX_CHARS=6000                      # leading chars of a file sent to the LLM for its description
 SEARCH_TOP_K=5                               # nearest chunks per (collection, query) before stitching
 
 # ── Neighbor stitching (vdb_settings) ──
@@ -231,5 +244,6 @@ MAX_EXPANDED=16                              # cap on stitched chunks per result
 - **Whole-block retrieval** — if answers to "list the whole X" (table of contents, references) still truncate, raise `EXPAND_PADDING` (reach further from each hit) or `BRIDGE_GAP` (tolerate larger holes between relevant regions). The effective hit-merge distance is `2*EXPAND_PADDING + BRIDGE_GAP + 1`. `MAX_EXPANDED` caps how much a single result can grow.
 - **Chunk granularity** — larger `CHUNK_SIZE` packs more context per chunk (fewer, coarser chunks → better for whole-section reads, worse precision); smaller is the opposite. `CHUNK_OVERLAP` carries context across boundaries. Changing either only affects **newly indexed** documents — reindex to apply.
 - **Embedding model** — `EMBEDDING_MODEL` is a footgun: a different model means a different vector dimension, so existing tables become incompatible. **Reindex every project after changing it.**
+- **Per-project overrides (web)** — `CHUNK_SIZE`, `CHUNK_OVERLAP`, `DESCRIPTIONS_ENABLED`, `DESCRIBE_MAX_CHARS` plus the stitching knobs `EXPAND_PADDING` and `BRIDGE_GAP` can be overridden per project in the *Indexing settings* dialog; the `.env` values above are the defaults for projects that never changed them. Applying an index-time override triggers that project's full reindex; stitching overrides apply from the next search (they're threaded through graph state into `gather_neighbors`).
 
-> Changes to chunking/embedding settings require a **reindex** to take effect (web: *Edit files → Done & reindex*; CLI: re-run the indexer). Search/stitching settings (`SEARCH_TOP_K`, `EXPAND_PADDING`, `BRIDGE_GAP`, `MAX_EXPANDED`) apply immediately on the next query — no reindex needed.
+> Changes to chunking/embedding settings require a **reindex** to take effect (web: the *Indexing settings* dialog's **Apply** does it; CLI: re-run the indexer). Search/stitching settings (`SEARCH_TOP_K`, `EXPAND_PADDING`, `BRIDGE_GAP`, `MAX_EXPANDED`) apply immediately on the next query — no reindex needed.

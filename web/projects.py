@@ -15,7 +15,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from src.vectordb.indexer import SUPPORTED_SUFFIXES
+from src.vectordb.indexer import SUPPORTED_SUFFIXES, resolve_index_settings
 
 
 def _now_iso() -> str:
@@ -91,6 +91,22 @@ class ProjectStore:
     def delete(self, pid: str) -> None:
         shutil.rmtree(self._project_dir(pid), ignore_errors=True)
         shutil.rmtree(Path(self.db_path(pid)), ignore_errors=True)
+
+    # ── per-project indexing settings ──
+
+    def get_index_settings(self, pid: str) -> dict:
+        """Indexing hyperparameters for this project, defaults filled in.
+
+        Projects without saved settings get the global vdb_settings values.
+        """
+        meta = self._read_meta(pid)
+        return resolve_index_settings(meta.get("index_settings"))
+
+    def set_index_settings(self, pid: str, settings: dict) -> dict:
+        meta = self._read_meta(pid)
+        meta["index_settings"] = resolve_index_settings(settings)
+        self._write_meta(pid, meta)
+        return meta["index_settings"]
 
     # ── files (directory is the source of truth) ──
 

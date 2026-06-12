@@ -86,12 +86,23 @@ def test_plan_result():
 
 
 def test_sufficient_context_result():
-    """Verify SufficientContextResult model."""
+    """Verify SufficientContextResult model (information-gap contract).
+
+    An insufficient verdict must quote the question verbatim and describe the
+    gap via the «Не хватает / Найдено вместо этого» template — the judge speaks
+    the language of information, never routes. Details in test_judge_contract.py.
+    """
     result = SufficientContextResult(
+        question_verbatim="Какие аллергии есть у пациента?",
+        reason="Найдены записи о сыпи, но данных об аллергиях нет",
+        draft_answer="В найденном контексте сведений об аллергиях нет",
+        missing_parts=["записи об аллергиях пациента"],
         sufficient=False,
-        reason="Missing allergy info",
-        feedback="Search for rashes in clinical notes",
-        missing_parts=["allergy records"],
+        feedback=(
+            "Не хватает: записи об аллергиях пациента. "
+            "Найдено вместо этого: только упоминания сыпи без причины. "
+            "Альтернативные формулировки: «аллергический анамнез», «непереносимость»."
+        ),
     )
     assert result.sufficient is False
     assert len(result.missing_parts) == 1
