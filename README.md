@@ -175,7 +175,8 @@ data/
 │   └── {table}.lance/              # one table (Lance dataset) per file
 │       ├── data/ … (columnar fragments: text + 384-d vector)
 │       └── _versions, _transactions  # Lance manifest (versioned, ACID)
-└── lancedb/_cli/                   # CLI default (LANCE_DB_PATH) — same data/ root
+├── lancedb/_cli/                   # CLI default (LANCE_DB_PATH) — same data/ root
+└── fastembed_cache/                # embedding model (ONNX, ~252MB), downloaded once
 ```
 Everything lives under `data/` (created automatically). The CLI's global DB is just another dir under `data/lancedb/` (`_cli`), kept apart from per-project DBs whose names are project UUIDs.
 
@@ -214,6 +215,7 @@ MAX_ITERATIONS=3                             # max search→check retries before
 # ── Vector DB (vdb_settings) ──
 LANCE_DB_PATH=./data/lancedb/_cli            # CLI/global DB dir (web overrides per project)
 EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2   # ⚠ multilingual (RU+), 384d; changing model → full reindex
+EMBEDDING_CACHE_DIR=./data/fastembed_cache   # where the ~252MB ONNX model lives (FastEmbed's default /tmp is wiped on reboot)
 CHUNK_SIZE=1000                              # chunk target, chars (new docs only)
 CHUNK_OVERLAP=150                            # chunk overlap, chars
 DESCRIPTIONS_ENABLED=true                    # LLM file summary at index time; Planner routes with it

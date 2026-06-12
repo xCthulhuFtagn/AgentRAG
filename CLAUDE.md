@@ -76,7 +76,7 @@ relevant route — on the initial turn or on iteration — it goes straight to
 ## Vector DB (LanceDB)
 
 **LanceDB** — embedded/serverless (no DB process), stores Lance columnar files on disk, async, persists across restarts. Self-contained module at `src/vectordb/`:
-- `embeddings.py` — FastEmbed (ONNX, `paraphrase-multilingual-MiniLM-L12-v2`, **384d**, multilingual incl. Russian — an English-only model blinds retrieval on a non-English corpus); `embed`/`embed_batch` run sync ONNX off the loop via `asyncio.to_thread`; model cached `@lru_cache`.
+- `embeddings.py` — FastEmbed (ONNX, `paraphrase-multilingual-MiniLM-L12-v2`, **384d**, multilingual incl. Russian — an English-only model blinds retrieval on a non-English corpus); `embed`/`embed_batch` run sync ONNX off the loop via `asyncio.to_thread`; model cached `@lru_cache`. The ~252MB model file lives in `EMBEDDING_CACHE_DIR` (default `./data/fastembed_cache`) — FastEmbed's own default is `{tempdir}/fastembed_cache`, and /tmp is tmpfs on many distros: wiped each reboot → re-download every boot, broken air-gapped runs.
 - `client.py` — `get_async_db(db_path)` / `get_sync_db(db_path)`; `db_path or LANCE_DB_PATH`.
 - `config.py` — `VectorDBSettings` (pydantic-settings, `vdb_settings` instance): all vectordb knobs from `.env` (path, model, chunking, search, stitching). See [Configuration](#configuration).
 - `describe.py` — `describe_document(text)`: LLM reads an excerpt at index time → a 1–2 sentence content summary. Self-contained (builds its own DeepSeek client from `general_settings`, no `agents` import).
@@ -122,6 +122,7 @@ Settings are **pydantic-settings** `BaseSettings` classes — typed, validated, 
 | --- | --- | --- |
 | `LANCE_DB_PATH` | `./data/lancedb/_cli` | CLI/global DB dir (web overrides per project) |
 | `EMBEDDING_MODEL` | `sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` | FastEmbed model (multilingual, 384d). **Changing the model → full reindex required** |
+| `EMBEDDING_CACHE_DIR` | `./data/fastembed_cache` | where FastEmbed stores the downloaded ONNX model (~252MB); the library default `/tmp/fastembed_cache` is wiped on reboot |
 | `CHUNK_SIZE` | `1000` | chunk target (chars); new docs only |
 | `CHUNK_OVERLAP` | `150` | chunk overlap (chars) |
 | `DESCRIPTIONS_ENABLED` | `true` | generate LLM file summaries at index time + Planner routes with them |

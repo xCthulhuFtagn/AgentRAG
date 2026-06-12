@@ -13,8 +13,16 @@ from src.vectordb.config import vdb_settings
 
 @lru_cache(maxsize=1)
 def _get_embedding_model() -> TextEmbedding:
-    """Load FastEmbed model (cached). BAAI/bge-small-en-v1.5 — 384 dims."""
-    return TextEmbedding(model_name=vdb_settings.embedding_model)
+    """Load FastEmbed model (cached): vdb_settings.embedding_model, 384 dims.
+
+    cache_dir must be explicit: FastEmbed's default is {tempdir}/fastembed_cache,
+    and /tmp is tmpfs on many distros — the ~252MB model would re-download after
+    every reboot (and air-gapped runs would break).
+    """
+    return TextEmbedding(
+        model_name=vdb_settings.embedding_model,
+        cache_dir=vdb_settings.embedding_cache_dir,
+    )
 
 
 async def embed(text: str) -> list[float]:

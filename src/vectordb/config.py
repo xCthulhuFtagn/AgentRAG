@@ -35,6 +35,12 @@ class VectorDBSettings(BaseSettings):
     # makes existing vectors incompatible → full reindex required. The dimension
     # is derived from the model, never hardcoded.
     embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    # Where FastEmbed stores the downloaded ONNX model (~252MB). Without an
+    # explicit dir FastEmbed defaults to {tempdir}/fastembed_cache, and /tmp is
+    # tmpfs on many distros — wiped on reboot → the model re-downloads every
+    # boot (and breaks air-gapped use). Kept under data/ with the rest of the
+    # persistent state.
+    embedding_cache_dir: str = "./data/fastembed_cache"
 
     # ── Indexing / chunking (chars) ──────────────────────────────────────────
     # Only affects newly indexed documents; reindex to apply to existing ones.
