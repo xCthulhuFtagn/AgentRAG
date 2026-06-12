@@ -23,11 +23,13 @@ def build_graph() -> StateGraph:
 
     Every node returns Command(goto=...). Zero edges. Pure Command-driven flow.
     Pure RAG: every query goes through retrieval — no orchestrator/complexity
-    gate, no fallbacks (no broad search-all, no general-knowledge answer).
+    gate, no general-knowledge fallback. Refusals are evidence-based: the
+    planner probes an implausible-looking corpus instead of refusing it
+    unsearched, so give_up without a search needs an empty knowledge base.
 
         planner ◄── entry_point ◄───────────────┐
           │                                      │
-          ├⟶ no relevant collection:             │
+          ├⟶ empty KB / iteration exhausted:     │
           │  Command(goto="give_up")             │
           │                                      │
           └⟶ Command(goto="query_rewriter")       │

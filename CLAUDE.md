@@ -11,15 +11,18 @@ Exit: `Command(goto=END)` in synthesis or give_up nodes.
 
 **Pure RAG — single functionality.** Every query goes through retrieval. There is
 no orchestrator / complexity gate (no "answer directly without searching") and no
-fallbacks: no broad search-all, no general-knowledge answer. If nothing in the
-corpus is relevant, the system refuses honestly via `give_up`.
+fallbacks: no general-knowledge answer, no answering from noise. Refusals are
+honest AND evidence-based: a claim of absence requires an actual search —
+descriptions can justify routing priority, never absence — so on the initial
+turn the Planner probes the least-implausible collections instead of refusing;
+`give_up` without a single search happens only when the knowledge base is empty.
 
 ## Graph flow
 
 ```
   planner → query_rewriter → search_fanout → sufficient_context
      ▲   │                                       │
-     │   └─ no relevant collection ──► give_up ──► END
+     │   └─ empty KB, or iteration exhausted ──► give_up ──► END
      │       insufficient + iters left           │
      └───────────────────────────────────────────┘
      (re-route: planner re-plans for the missing piece)
@@ -30,15 +33,18 @@ corpus is relevant, the system refuses honestly via `give_up`.
 
 The loop re-enters at **planner** — on iteration the Planner re-routes to the
 collection(s) most likely to hold the missing piece (mirrors Google RAG Engine's
-loop that re-enters before its Search Plan agent). If the Planner finds no
-relevant route — on the initial turn or on iteration — it goes straight to
-`give_up` (no broad fallback).
+loop that re-enters before its Search Plan agent). On the initial turn the
+Planner never refuses an non-empty corpus unsearched: if no collection looks
+relevant it emits probe routes (prompt rule + a code backstop capped at
+`_PROBE_LIMIT`); the judge then rules on the actual retrieval. It goes straight
+to `give_up` only with an empty knowledge base, or on iteration when every
+plausible collection is searched to exhaustion.
 
 ## Nodes (6 total)
 
 | # | Node | Returns |
 |---|------|---------|
-| 1 | planner | `Command(goto="query_rewriter" \| "give_up")` — `"give_up"` whenever no collection is relevant (initial turn **or** iteration) |
+| 1 | planner | `Command(goto="query_rewriter" \| "give_up")` — `"give_up"` only for an empty KB or iteration exhaustion; an implausible-looking corpus is probed on the initial turn, not refused |
 | 2 | query_rewriter | `Command(goto="search_fanout")` — always rewrites the Planner's routes (one task per route) |
 | 3 | search_fanout | `Command(goto="sufficient_context")` |
 | 4 | sufficient_context | `Command(goto="synthesis" \| "planner" \| "give_up")` — `"planner"` re-routes for the missing piece |
@@ -52,7 +58,7 @@ relevant route — on the initial turn or on iteration — it goes straight to
 - **TypedDict state** — not Pydantic BaseModel; uses `Annotated[list, operator.add]` reducers so `search_results`/`trace`/`rewritten_queries` accumulate across iterations
 - **All async** — nodes are `async def`, tools are `async def`, streaming via `graph.astream()`
 - **Only vector search tools** — `vector_search` and `list_collections` via LanceDB; no web/Wikipedia APIs
-- **Honest refusal** — Give Up node builds a system-generated message (no LLM) listing what was found, what's missing, and why
+- **Honest refusal** — Give Up node builds a system-generated message (no LLM) listing what was found, what's missing, and why. The final answer is rendered as **markdown** in the web UI, so collection names (underscores → italics) are backtick-wrapped everywhere they reach the user: give_up wraps its lists and any bare names inside the judge-written reason (`_backtick_names`); Synthesis sees names pre-backticked in its prompt (inventory + source headers) plus an explicit rule, and mirrors the format
 - **Structured output via function calling** — `get_structured_llm()` in `common.py` uses `with_structured_output(schema, method="function_calling")`. DeepSeek's API rejects the default json_schema `response_format` ("This response_format type is unavailable now").
 - **Validation-driven retries + honest LLM-failure refusal** — every structured node calls `generate_structured(schema, prompt)` (`common.py`), not the raw LLM. Every requirement on a result is a Pydantic constraint (required fields; `RouteStep._non_empty` rejects blank `collection`/`subquery`; `SufficientContextResult._insufficient_verdict_is_actionable` rejects a `sufficient=False` verdict whose `feedback` is empty or off-template, or whose `missing_parts` have blank items). Constraints needing node-time context use the same path: `make_sufficient_context_schema(collection_names, query)` (`state.py`) returns a dynamic subclass (function-calling name kept stable) with two extra validators — `question_verbatim` must be a (normalized-)literal copy of the user's query, and `feedback`/`missing_parts` of an insufficient verdict must not contain any collection name (weak models prescribe routes regularly, so the ban is mechanical, not prompt-only). A violation — or a transport error, or no tool call — raises, and `generate_structured` re-prompts with the failure text up to `STRUCTURED_MAX_RETRIES` times (one uniform path: no per-schema retry hooks). If the model still can't satisfy the schema it raises `StructuredGenerationError`; the `llm_failsafe` wrapper (applied to every node except `give_up` in `build_graph`) catches that **and** `openai.APIError` from the free-text nodes (`query_rewriter`/`synthesis`), routing to `give_up` with `llm_error` set so the refusal honestly cites the model failure instead of crashing. Non-LLM exceptions (code bugs) propagate.
 - **All LLM-facing text is Russian** — agent prompts, schema field `description`s (they ship inside the function-calling schema), validator error messages (they are re-prompted back to the model on failure), and the placeholder strings interpolated into prompts (`(без описания)`, `(результатов поиска пока нет)`, …). The corpus is Russian — prompting in English made the model reason in English about Russian documents. Code identifiers, comments, logs and docs stay English.
@@ -146,7 +152,7 @@ Sufficient Context Agent returns:
 
 `feedback` is an **information gap**, not a route — template *«Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….»*, no collection names (validated; see Judge ↔ Planner separation of concerns). It is required whenever `sufficient=False` — the Planner's iteration mode keys off it.
 
-**Re-routing on iteration.** The loop re-enters at the **Planner**: with `feedback` + `iteration_count > 0` set, `planner` uses `PLANNER_ITERATION_PROMPT` to re-route to the collection(s) most likely to hold the missing piece — matching the gap (and its alternative phrasings) against collection descriptions and the coverage/novelty statistics, preferring unsearched collections; a collection whose last search yielded `+0 новых` may be revisited only with a radically different angle. If the Planner finds no relevant route — initial turn, or on iteration when every plausible collection is exhausted — it returns empty steps and goes straight to `give_up` (pure RAG: no broad fallback), with an exhaustion-specific reason on iteration. `query_rewriter` therefore has a single mode: rewrite the Planner's routes, one search task per route, avoiding the already-executed queries it is shown. Max iterations: 3.
+**Re-routing on iteration.** The loop re-enters at the **Planner**: with `feedback` + `iteration_count > 0` set, `planner` uses `PLANNER_ITERATION_PROMPT` to re-route to the collection(s) most likely to hold the missing piece — matching the gap (and its alternative phrasings) against collection descriptions and the coverage/novelty statistics, preferring unsearched collections; a collection whose last search yielded `+0 новых` may be revisited only with a radically different angle. On the initial turn the Planner may not refuse unsearched (it probes instead — see Graph flow); empty steps lead to `give_up` only for an empty knowledge base or, on iteration, when every plausible collection is exhausted (with an exhaustion-specific reason). `query_rewriter` therefore has a single mode: rewrite the Planner's routes, one search task per route, avoiding the already-executed queries it is shown. Max iterations: 3.
 
 ## Running
 

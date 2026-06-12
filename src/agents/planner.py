@@ -1,8 +1,13 @@
 """Planner Agent — breaks down query into search routes.
 
-Returns Command(goto="query_rewriter") when it found relevant collections, or
-Command(goto="give_up") when no indexed collection is relevant (pure RAG: no
-fallback to a broad search or to a general-knowledge answer).
+Returns Command(goto="query_rewriter") with routes, or Command(goto="give_up")
+only when refusal is justified: the knowledge base is empty, or an iteration
+found every plausible collection exhausted. A claim of absence needs retrieval
+evidence — a description compresses a document to 1-2 sentences and can prove
+relevance, never absence — so on the INITIAL turn an implausible-looking
+corpus is probed (1-2 least-implausible collections, raw query), not refused;
+the judge rules on what the search actually returns. Pure RAG otherwise stands:
+answers come only from retrieved context, no general-knowledge fallback.
 No Send — all routes processed together in query_rewriter.
 """
 
@@ -19,6 +24,11 @@ from src.agents.common import (
 )
 from src.vectordb.config import vdb_settings
 from src.vectordb.tools import count_chunks, list_collections, list_collections_described
+
+# Probe backstop cap: when the model declines every route on the initial turn,
+# this many collections are searched with the raw query before any refusal —
+# vector search is LLM-free, so the probe costs no tokens by itself.
+_PROBE_LIMIT = 3
 
 PLANNER_PROMPT = """Ты — Агент-Планировщик (Planner) в системе Agentic RAG.
 
@@ -39,8 +49,11 @@ PLANNER_PROMPT = """Ты — Агент-Планировщик (Planner) в си
 
 Если вопрос требует информации из нескольких коллекций — создай несколько шагов.
 Если на вопрос можно ответить по одной коллекции — создай один шаг.
-Если ни одна коллекция не релевантна вопросу — верни пустой список steps:
-система честно сообщит, что ей не из чего ответить."""
+Если ни одна коллекция не выглядит релевантной — НЕ отказывайся: описание сжимает
+документ до 1–2 предложений и не может доказать ОТСУТСТВИЕ чего-либо в тексте.
+Выбери 1–2 наименее неправдоподобные коллекции (по любым зацепкам: сущности из
+вопроса, смежные области) и создай зонд-маршруты — отсутствие подтверждается
+только реальным поиском, и вердикт по его результатам вынесет судья."""
 
 PLANNER_ITERATION_PROMPT = """Ты — Агент-Планировщик (Planner) в системе Agentic RAG.
 
@@ -92,12 +105,14 @@ async def planner_node(
     db_path = state.get("db_path")
     if vdb_settings.descriptions_enabled:
         described = await list_collections_described(db_path)
+        available = [c["collection"] for c in described]
         lines = [
             f"- {c['collection']} — {c['description'] or '(без описания)'}"
             for c in described
         ]
     else:
         names = await list_collections.ainvoke({"db_path": db_path})
+        available = list(names)
         lines = [f"- {n}" for n in names]
     collections_str = (
         "\n".join(lines)
@@ -157,16 +172,50 @@ async def planner_node(
     )
 
     if not plan.steps:
-        # Pure RAG: no route means the knowledge base cannot answer this query.
-        # No fallback (no broad search-all, no general-knowledge answer) — hand
-        # to give_up for an honest refusal, reporting whatever was found in
-        # earlier iterations. On iteration the honest reason differs: the
-        # relevant collections existed but were searched to exhaustion.
+        if not is_iteration and available:
+            # Epistemic backstop: a claim of absence needs retrieval evidence.
+            # Descriptions can justify routing priority, never absence — the
+            # prompt already says "probe instead of refusing", so reaching this
+            # branch means the model declined anyway. Probe a few collections
+            # with the raw query and let the judge rule on the actual results.
+            probe_steps = [
+                {
+                    "collection": collection,
+                    "subquery": state["query"],
+                    "rationale": (
+                        "Зонд: ни одна коллекция не выглядела релевантной по "
+                        "описанию, но описание не доказывает отсутствие — "
+                        "проверяем реальным поиском."
+                    ),
+                }
+                for collection in available[:_PROBE_LIMIT]
+            ]
+            trace_entry = make_trace_entry(
+                agent="planner",
+                decision=f"probe: {len(probe_steps)} route(s)",
+                detail=str(probe_steps),
+                info=(
+                    "зонд-маршруты: отсутствие подтверждается только реальным "
+                    "поиском, вердикт вынесет судья"
+                ),
+            )
+            return Command(
+                goto="query_rewriter",
+                update={
+                    "plan_steps": probe_steps,
+                    "current_route": probe_steps[0],
+                    "trace": [trace_entry],
+                },
+            )
+
+        # Refusal is justified: either the knowledge base has no collections at
+        # all, or an iteration concluded every plausible collection is already
+        # searched to exhaustion. Pure RAG — no general-knowledge fallback.
         reason = (
             "Every plausibly-relevant collection has already been searched to "
             "exhaustion — no new route could close the remaining gap."
             if is_iteration
-            else "The planner found no indexed collection relevant to this query."
+            else "The knowledge base contains no indexed collections."
         )
         return Command(
             goto="give_up",

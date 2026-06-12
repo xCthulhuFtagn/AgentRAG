@@ -268,6 +268,110 @@ def test_queries_already_tried_per_collection():
     assert _queries_already_tried(results, "geo") == []
 
 
+# ── Planner: claims of absence need retrieval evidence ──────────────────────
+
+def _patch_planner(monkeypatch, collections: list[str]):
+    """Stub the planner's LLM and DB lookups; the model declines every route."""
+    from src.agents import planner as pl
+    from src.state import PlanResult
+
+    async def fake_generate(schema, prompt, **kwargs):
+        return PlanResult(is_multi_step=False, steps=[])
+
+    async def fake_described(db_path=None):
+        return [{"collection": c, "description": "…"} for c in collections]
+
+    async def fake_count(collection, db_path=None):
+        return 100
+
+    monkeypatch.setattr(pl, "generate_structured", fake_generate)
+    monkeypatch.setattr(pl, "list_collections_described", fake_described)
+    monkeypatch.setattr(pl, "count_chunks", fake_count)
+    return pl
+
+
+@pytest.mark.asyncio
+async def test_planner_probes_instead_of_initial_refusal(monkeypatch):
+    # The model declined every route on the initial turn — but a description
+    # can't prove absence, so the planner must probe, not give up unsearched.
+    pl = _patch_planner(monkeypatch, ["lit", "bio", "geo", "astro"])
+    state = make_initial_state(query="свиные крылья")
+
+    command = await pl.planner_node(state, config={})
+
+    assert command.goto == "query_rewriter"
+    probed = command.update["plan_steps"]
+    assert [s["collection"] for s in probed] == ["lit", "bio", "geo"]  # capped at 3
+    assert all(s["subquery"] == "свиные крылья" for s in probed)
+
+
+@pytest.mark.asyncio
+async def test_planner_iteration_exhaustion_gives_up(monkeypatch):
+    # On iteration an empty plan is a legitimate, evidence-based exit.
+    pl = _patch_planner(monkeypatch, ["lit"])
+    state = make_initial_state(query="q")
+    state["iteration_count"] = 1
+    state["feedback"] = "Не хватает: факт. Найдено вместо этого: ничего."
+    state["search_results"] = [
+        {"collection": "lit", "subquery": "q", "chunks": [], "seqs": []}
+    ]
+
+    command = await pl.planner_node(state, config={})
+
+    assert command.goto == "give_up"
+    assert "exhaustion" in command.update["sufficient_reason"]
+
+
+@pytest.mark.asyncio
+async def test_planner_empty_corpus_gives_up(monkeypatch):
+    # No collections at all — the only refusal allowed without a search.
+    pl = _patch_planner(monkeypatch, [])
+    state = make_initial_state(query="q")
+
+    command = await pl.planner_node(state, config={})
+
+    assert command.goto == "give_up"
+    assert "no indexed collections" in command.update["sufficient_reason"]
+
+
+# ── Give Up: collection names must survive markdown rendering ───────────────
+
+def test_refusal_backticks_collection_names():
+    # The web UI renders the refusal as markdown: bare 07_Lit_1991 loses its
+    # underscores to italics, so every name — in the code-built searched list
+    # and inside the judge-written reason — must be backtick-wrapped.
+    from src.agents.give_up import _build_refusal_answer
+
+    state = make_initial_state(query="пушкин")
+    state["search_results"] = [
+        {"collection": "07_Lit_1991", "subquery": "x", "chunks": ["c"], "seqs": [1]}
+    ]
+    state["sufficient_reason"] = (
+        "Коллекция 07_Lit_1991 обыскана, 08_Geo_1933 нерелевантна."
+    )
+
+    text = _build_refusal_answer(state, ["07_Lit_1991", "08_Geo_1933"])
+
+    assert "`07_Lit_1991`" in text
+    assert "`08_Geo_1933`" in text
+    # No bare occurrences left anywhere in the rendered refusal.
+    assert text.count("07_Lit_1991") == text.count("`07_Lit_1991`")
+
+
+def test_backtick_names_guards():
+    from src.agents.give_up import _backtick_names
+
+    # Already-wrapped and substring-of-longer-name occurrences stay untouched.
+    text = _backtick_names(
+        "уже `lit` обёрнут, lit отдельно, внутри lit_extra не трогать",
+        ["lit", "lit_extra"],
+    )
+    assert "уже `lit` обёрнут" in text
+    assert ", `lit` отдельно" in text
+    assert "`lit_extra`" in text
+    assert "`lit`_extra" not in text
+
+
 # ── Fanout: every executed search is recorded, empty ones included ──────────
 
 @pytest.mark.asyncio

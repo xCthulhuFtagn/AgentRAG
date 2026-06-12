@@ -9,14 +9,16 @@ Implementation of Google Research's [Agentic RAG](https://research.google/blog/u
 Fully edgeless LangGraph graph — zero `add_edge` calls, all routing via `Command(goto=...)`.
 
 **Pure RAG — single functionality.** Every query goes through retrieval: no
-orchestrator / complexity gate (no answering without searching) and no fallbacks
-(no broad search-all, no general-knowledge answer). If nothing in the corpus is
-relevant, the system refuses honestly via Give Up.
+orchestrator / complexity gate (no answering without searching) and no
+general-knowledge fallback. Refusals are honest **and evidence-based**: a claim
+of absence requires an actual search, so an implausible-looking corpus gets
+probed rather than refused — Give Up without a single search happens only when
+the knowledge base is empty.
 
 ```
       planner ◄── entry_point ◄────────────────────┐
         │                                          │
-        ├─ no relevant collection:                 │
+        ├─ empty KB / iteration exhausted:         │
         │    Command(goto="give_up") → END          │
         │ Command(goto="query_rewriter")            │
         ▼                                          │
@@ -40,15 +42,18 @@ relevant, the system refuses honestly via Give Up.
 
 On iteration the loop re-enters at the **Planner**, which re-routes to the
 collection(s) most likely to hold the missing piece (mirrors Google RAG
-Engine's loop that re-enters before its Search Plan agent). If the Planner
-finds no relevant route — initial turn or iteration — it goes straight to
-**Give Up** (no broad fallback).
+Engine's loop that re-enters before its Search Plan agent). On the initial
+turn the Planner never refuses a non-empty corpus unsearched — descriptions
+can't prove absence, so it probes the least-implausible collections and lets
+the judge rule on the actual retrieval. It goes straight to **Give Up** only
+with an empty knowledge base, or on iteration when every plausible collection
+is searched to exhaustion.
 
 ### 6 agents
 
 | Agent | Role |
 |-------|------|
-| **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; no relevant collection → Give Up |
+| **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; probes the least-implausible collections when nothing looks relevant (absence needs search evidence); Give Up only on an empty KB or iteration exhaustion |
 | **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); one search task per route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
 | **Sufficient Context** | Decides ONE thing: *would another search of the corpus materially improve the answer to the question as asked?* Answer found — sufficient; corpus exhausted on the topic — also sufficient (the answer states what the sources contain, even if thin); zero findings — never. Copies the question verbatim first (anti-inflation anchor), describes any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); reads the inventory + code-computed search statistics |
@@ -146,7 +151,7 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
    - **Zero findings** → never sufficient; once no routes remain, the system refuses honestly
    - **Concrete reason to expect more** (an unsearched plausible collection, an untried search angle) → insufficient, with the **information gap** described: *what fact* is missing, *what was found instead*, *what alternative phrasings* might name it
 2. If insufficient + iterations left → returns `Command(goto="planner")` with `missing_parts` and `feedback` following a strict template: *«Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….»* — pure information language. Naming a collection ("search in Y") is a **validation error**: the judge says *what* is missing, the Planner decides *where* to look (separation of concerns, enforced by schema + re-prompt)
-3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter — which is shown the queries already executed against each collection, so iteration rewrites stop converging to the same bag of words. If no relevant route exists — or every plausible collection is already exhausted — the Planner returns empty steps and goes straight to Give Up (pure RAG — no broad fallback)
+3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter — which is shown the queries already executed against each collection, so iteration rewrites stop converging to the same bag of words. When every plausible collection is already exhausted, the Planner returns empty steps and goes straight to Give Up (pure RAG — no general-knowledge fallback)
 4. Search Fanout searches again → Sufficient Context checks again
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
 6. Give Up node builds an honest refusal: what was searched, what was found, what's missing, why

@@ -83,17 +83,26 @@ class _TokenUsageHandler(AsyncCallbackHandler):
 _token_handler = _TokenUsageHandler()
 
 
-def format_inventory(described: list[dict]) -> str:
-    """Render [{collection, description}] as the inventory block for prompts."""
+def format_inventory(described: list[dict], *, backtick_names: bool = False) -> str:
+    """Render [{collection, description}] as the inventory block for prompts.
+
+    backtick_names wraps each collection name in `…` — for Synthesis, whose
+    output the web UI renders as markdown: a bare table name like
+    07_Rodnaya_literatura gets its underscores eaten as italics. The model
+    mirrors the formatting it sees, so the prompt shows names pre-backticked.
+    The judge/planner prompts keep bare names (the planner must emit the exact
+    table name in RouteStep.collection — backticks there would corrupt it).
+    """
     if not described:
         return "(база знаний пуста — нет ни одной проиндексированной коллекции)"
-    return "\n".join(
-        f"- {c['collection']} — {c['description'] or '(без описания)'}"
-        for c in described
-    )
+    lines = []
+    for c in described:
+        name = f"`{c['collection']}`" if backtick_names else c["collection"]
+        lines.append(f"- {name} — {c['description'] or '(без описания)'}")
+    return "\n".join(lines)
 
 
-async def get_inventory_str(db_path: str | None) -> str:
+async def get_inventory_str(db_path: str | None, *, backtick_names: bool = False) -> str:
     """The full corpus inventory — every collection plus its description.
 
     Ground truth for "what's in the knowledge base": the complete list of
@@ -104,7 +113,8 @@ async def get_inventory_str(db_path: str | None) -> str:
     "all/every/complete" request and the loop always ends in give_up. Also given
     to Synthesis so it can describe each file from its summary.
     """
-    return format_inventory(await list_collections_described(db_path))
+    described = await list_collections_described(db_path)
+    return format_inventory(described, backtick_names=backtick_names)
 
 
 # ── Mechanical search statistics ─────────────────────────────────────────────

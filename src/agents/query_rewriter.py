@@ -79,8 +79,10 @@ async def query_rewriter_node(
 ) -> Command:
     """Query Rewriter: produce search-optimized queries, command search_fanout.
 
-    The Planner guarantees ≥1 route (no relevant collection → give_up), so we
-    always rewrite its plan — one search task per route, no fallback modes.
+    The Planner guarantees ≥1 route whenever it commands this node (it gives up
+    directly on an empty KB / iteration exhaustion, and probes instead of
+    refusing otherwise), so we always rewrite its plan — one search task per
+    route, no fallback modes.
     Routes are independent → rewrite them concurrently (asyncio.gather), which
     preserves order so rewritten[i]/search_tasks[i] align with plan_steps[i].
     """
