@@ -51,7 +51,7 @@ finds no relevant route — initial turn or iteration — it goes straight to
 | **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; no relevant collection → Give Up |
 | **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); one search task per route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
-| **Sufficient Context** | Judges sufficiency **against the question as asked** (it first copies it verbatim — an anti-inflation anchor); describes any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); gets the full corpus inventory (ground truth) plus code-computed search statistics |
+| **Sufficient Context** | Decides ONE thing: *would another search of the corpus materially improve the answer to the question as asked?* Answer found — sufficient; corpus exhausted on the topic — also sufficient (the answer states what the sources contain, even if thin); zero findings — never. Copies the question verbatim first (anti-inflation anchor), describes any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); reads the inventory + code-computed search statistics |
 | **Synthesis** | Generates final answer with source citations; can describe every document from the inventory + retrieved chunks |
 | **Give Up** | System-generated refusal when context is exhausted; no LLM call |
 
@@ -140,17 +140,18 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 
 ## How the iteration loop works
 
-1. Sufficient Context Agent checks three things:
-   - **Retrieved snippets** — do they contain the needed facts?
-   - **Draft answer** — does it answer the question **as asked**? (The schema's first field is a verbatim copy of the question — a copy-not-generate anchor so the verdict doesn't drift toward an "ideally exhaustive answer" after tens of kB of chunks)
-   - **Information gap** — *what fact* is missing, *what was found instead*, *what alternative phrasings* might name it in the documents
+1. Sufficient Context Agent decides **one question**: *would one more search of the corpus materially improve the answer to the question as asked?* It is a retrieval-state call, not a grade against an ideal answer:
+   - **Answer found** → sufficient (don't keep searching for "more details" the user never asked for; the schema's first field is a verbatim copy of the question — a copy-not-generate anchor against question inflation)
+   - **Corpus exhausted on the topic** (every plausible collection searched to diminishing returns) → also sufficient: *"the sources contain only …"* is the system's honest answer, even if the findings are thin
+   - **Zero findings** → never sufficient; once no routes remain, the system refuses honestly
+   - **Concrete reason to expect more** (an unsearched plausible collection, an untried search angle) → insufficient, with the **information gap** described: *what fact* is missing, *what was found instead*, *what alternative phrasings* might name it
 2. If insufficient + iterations left → returns `Command(goto="planner")` with `missing_parts` and `feedback` following a strict template: *«Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….»* — pure information language. Naming a collection ("search in Y") is a **validation error**: the judge says *what* is missing, the Planner decides *where* to look (separation of concerns, enforced by schema + re-prompt)
-3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter. If it finds no relevant route, it goes straight to Give Up (pure RAG — no broad fallback)
+3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter — which is shown the queries already executed against each collection, so iteration rewrites stop converging to the same bag of words. If no relevant route exists — or every plausible collection is already exhausted — the Planner returns empty steps and goes straight to Give Up (pure RAG — no broad fallback)
 4. Search Fanout searches again → Sufficient Context checks again
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
 6. Give Up node builds an honest refusal: what was searched, what was found, what's missing, why
 
-Both loop participants read **mechanical search statistics** computed by code from the record of executed searches (empty searches are recorded too — never reconstructed by the model from chunk tags, which weak models hallucinate about): the judge sees the searched set plus the last-search novelty delta (*«обыскана 3 раза, последний поиск дал +0 новых чанков»* — a diminishing-returns exhaustion signal), the Planner sees per-collection coverage (*«извлечено 28/210 чанков (13%)»* — a routing signal, never a verdict criterion).
+Both loop participants read **mechanical search statistics** computed by code from the record of executed searches (empty searches are recorded too — never reconstructed by the model from chunk tags, which weak models hallucinate about): the judge sees the searched set, the last-search novelty delta (*«обыскана 3 раза, последний поиск дал +0 новых чанков»* — a diminishing-returns exhaustion signal) and the executed queries (grounding its "untried angle" call); the Planner sees per-collection coverage (*«извлечено 28/210 чанков (13%)»*) plus the same delta as its stop signal — low coverage explicitly does **not** mean "barely explored": a similar query just re-returns the same top chunks.
 
 The Sufficient Context Agent also receives the **complete corpus inventory** (every collection + its description) as ground truth. Without it, "describe all the files in the knowledge base"-type queries could never satisfy the judge — vector search returns similar chunks but never proves it has seen *every* document, so the loop always ran to `give_up`. With the inventory the judge can confirm full coverage, and for specific questions a *negative* answer only becomes final once every plausibly-relevant collection has actually been searched. Synthesis uses the same inventory to describe each document from its summary.
 

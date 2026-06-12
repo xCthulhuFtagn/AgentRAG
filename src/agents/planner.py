@@ -63,9 +63,15 @@ PLANNER_ITERATION_PROMPT = """Ты — Агент-Планировщик (Planne
 Где уже искали — статистика вычислена системой; ответа эти поиски НЕ дали:
 {searched}
 
-Покрытие «извлечено K/N чанков» — сигнал для МАРШРУТИЗАЦИИ, не вердикт:
-высокое покрытие означает, что коллекция практически исчерпана и возвращаться
-в неё бессмысленно; низкое покрытие само по себе НЕ повод искать именно там.
+Как читать статистику (она для маршрутизации, не для вердикта):
+- «последний поиск дал +0 новых чанков» = коллекция при нынешних формулировках
+  ИСЧЕРПАНА. Возвращаться в неё можно ТОЛЬКО с радикально другим углом
+  (конкретные названия, имена, термины из «альтернативных формулировок»
+  обратной связи) — НЕ с пересказом прежнего запроса другими словами.
+- Низкое покрытие «извлечено K/N» само по себе НЕ означает «там ещё много
+  неисследованного»: векторный поиск уже извлёк самое похожее на запрос, и
+  похожий запрос вернёт то же самое. Новые чанки приносит только новый угол.
+- Высокое покрытие маленькой коллекции = она прочитана почти целиком.
 
 Для каждой коллекции, которая правдоподобно может содержать недостающий фрагмент, создай RouteStep:
 - collection: точное имя таблицы (должно совпадать с одной из доступных)
@@ -73,11 +79,10 @@ PLANNER_ITERATION_PROMPT = """Ты — Агент-Планировщик (Planne
   АЛЬТЕРНАТИВНЫЕ ключевые слова или другой угол, отличный от уже испробованного
 - rationale: почему эта коллекция может содержать недостающее
 
-Уверенно ПРЕДПОЧИТАЙ коллекции, в которых ещё НЕ искали — возвращаться в уже
-обысканную коллекцию имеет смысл только с действительно другим подзапросом.
-Выбирай 1-3 самые релевантные коллекции. Если ни одна коллекция не выглядит
-релевантной — верни пустой список steps: система честно сообщит, что не смогла
-найти недостающее."""
+Уверенно ПРЕДПОЧИТАЙ коллекции, в которых ещё НЕ искали. Выбирай 1-3 самые
+релевантные. Если же каждая правдоподобно-релевантная коллекция уже исчерпана
+и нового угла не видно — верни ПУСТОЙ список steps: система честно сообщит,
+что не смогла найти недостающее. НЕ трать итерации на повтор исчерпанного."""
 
 
 async def planner_node(
@@ -152,17 +157,22 @@ async def planner_node(
     )
 
     if not plan.steps:
-        # Pure RAG: no relevant collection means the knowledge base cannot answer
-        # this query. No fallback (no broad search-all, no general-knowledge
-        # answer) — hand to give_up for an honest refusal, reporting whatever was
-        # found in earlier iterations.
+        # Pure RAG: no route means the knowledge base cannot answer this query.
+        # No fallback (no broad search-all, no general-knowledge answer) — hand
+        # to give_up for an honest refusal, reporting whatever was found in
+        # earlier iterations. On iteration the honest reason differs: the
+        # relevant collections existed but were searched to exhaustion.
+        reason = (
+            "Every plausibly-relevant collection has already been searched to "
+            "exhaustion — no new route could close the remaining gap."
+            if is_iteration
+            else "The planner found no indexed collection relevant to this query."
+        )
         return Command(
             goto="give_up",
             update={
                 "plan_steps": [],
-                "sufficient_reason": (
-                    "The planner found no indexed collection relevant to this query."
-                ),
+                "sufficient_reason": reason,
                 "trace": [trace_entry],
             },
         )

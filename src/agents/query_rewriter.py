@@ -21,16 +21,43 @@ REWRITER_PROMPT = """Ты — Агент-Переписчик Запросов (
 Текущая цель поиска: коллекция '{collection}'
 Что ищем: {subquery}
 
+Запросы, которые по этой коллекции УЖЕ выполнялись (они извлекли всё, что могли;
+близкий к ним запрос вернёт те же фрагменты — НЕ повторяй их формулировки):
+{tried}
+
 Правила:
 1. Будь конкретен, используй ключевые слова, которые вероятно встречаются в документах
 2. Убери вопросительные слова (кто, что, почему) — используй утвердительную форму
 3. Добавь синонимы и связанные термины
-4. Будь краток (максимум 1-2 предложения)
+4. Если выше перечислены уже выполненные запросы — возьми ДРУГОЙ угол: другие
+   термины, конкретные названия/имена из «что ищем», а не пересказ тех же слов
+5. Будь краток (максимум 1-2 предложения)
 
 Верни ТОЛЬКО текст переписанного поискового запроса, ничего больше."""
 
 
-async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str]:
+def _queries_already_tried(search_results: list[dict], collection: str) -> list[str]:
+    """Queries already executed against this collection (run order, deduped).
+
+    Mechanical input for the rewriter: without it, iteration rewrites converge
+    to the same bag of words (the Пушкин trace ran four near-identical queries)
+    and every repeat search returns the same chunks.
+    """
+    seen: set[str] = set()
+    tried: list[str] = []
+    for r in search_results or []:
+        if r.get("collection") != collection or r.get("error"):
+            continue
+        query = (r.get("subquery") or "").strip()
+        if query and query not in seen:
+            seen.add(query)
+            tried.append(query)
+    return tried
+
+
+async def _rewrite_route(
+    llm, original_query: str, step: dict, tried: list[str]
+) -> tuple[str, str]:
     """Rewrite one plan route into a search-optimized query.
 
     Returns (collection, query). Module-level so it isn't redefined per node
@@ -41,6 +68,7 @@ async def _rewrite_route(llm, original_query: str, step: dict) -> tuple[str, str
         original_query=original_query,
         collection=collection,
         subquery=step.get("subquery", original_query),
+        tried="\n".join(f"- «{q}»" for q in tried) or "(пока никаких)",
     )
     result: str = (await ainvoke_with_retry(llm, prompt)).content.strip().strip('"')
     return collection, result
@@ -58,9 +86,18 @@ async def query_rewriter_node(
     """
     llm = get_llm(temperature=0.3)
     plan_steps = state.get("plan_steps", [])
+    search_results = state.get("search_results", [])
 
     pairs = await asyncio.gather(
-        *[_rewrite_route(llm, state["query"], s) for s in plan_steps]
+        *[
+            _rewrite_route(
+                llm,
+                state["query"],
+                s,
+                _queries_already_tried(search_results, s.get("collection", "unknown")),
+            )
+            for s in plan_steps
+        ]
     )
     rewritten = [q for _, q in pairs]
     search_tasks = [{"collection": c, "query": q} for c, q in pairs]

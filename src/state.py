@@ -93,16 +93,22 @@ class SufficientContextResult(BaseModel):
     to search next — belongs to the Planner, so collection names are banned from
     `feedback`/`missing_parts` (enforced by make_sufficient_context_schema, which
     knows the inventory).
+
+    Verdict semantics: `sufficient` asks "would one more search of THIS corpus
+    materially improve the answer?" — a retrieval-state call, not a grade
+    against an ideal answer. An exhausted corpus whose findings are thin (only
+    passing mentions) is sufficient: the honest answer is "the sources contain
+    only …". Zero findings are never sufficient — that path stays a refusal.
     """
     question_verbatim: str = Field(
         description="САМОЕ ПЕРВОЕ: скопируй вопрос пользователя ДОСЛОВНО, символ в символ — ничего не добавляя, не сокращая и не перефразируя."
     )
     reason: str = Field(
-        description="Анализ: что из спрошенного в question_verbatim найденные фрагменты содержат, а чего в них нет. Оценивай относительно вопроса, КАК ОН ЗАДАН, — не добавляй подвопросов и критериев, которых пользователь не задавал."
+        description="Анализ из двух частей: (1) что по вопросу из question_verbatim найденные фрагменты содержат, а чего в них нет — относительно вопроса, КАК ОН ЗАДАН, без добавления подвопросов, которых пользователь не задавал; (2) по статистике поисков — исчерпана ли база по теме вопроса, или есть конкретная причина ожидать от неё большего (необысканная коллекция, неиспробованные формулировки)."
     )
     draft_answer: str = Field(
         default="",
-        description="Лучший ответ на вопрос из question_verbatim, построенный ТОЛЬКО из найденного контекста. Если в контексте ответа нет — прямо так и напиши; не заполняй это поле из общих знаний.",
+        description="Лучший ответ на вопрос из question_verbatim, построенный ТОЛЬКО из найденного контекста. Если по теме есть лишь отдельные упоминания — приведи их («в источниках об этом только …»): для исчерпанной базы это и есть ответ. Если не найдено вообще ничего — прямо так и напиши; не заполняй поле из общих знаний.",
     )
     missing_parts: list[str] = Field(
         default_factory=list,
@@ -111,7 +117,7 @@ class SufficientContextResult(BaseModel):
 
     _coerce_missing = field_validator("missing_parts", mode="before")(_coerce_list)
     sufficient: bool = Field(
-        description="ВЕРДИКТ, выносится ПОСЛЕ полей выше. True, если draft_answer отвечает на вопрос из question_verbatim, КАК ОН ЗАДАН, опираясь на найденные фрагменты, — даже если можно было бы найти «больше деталей». Черновик вида «не найдено / отсутствует / не упоминается» НЕ достаточен — ставь False, пока остаётся необысканная правдоподобно-релевантная коллекция."
+        description="ВЕРДИКТ, выносится ПОСЛЕ полей выше; вопрос вердикта — даст ли ещё один поиск по базе что-то, заметно улучшающее ответ. True в двух случаях: (1) draft_answer отвечает на вопрос из question_verbatim, КАК ОН ЗАДАН, — даже если можно было бы найти «больше деталей»; (2) база ИСЧЕРПАНА по теме (все правдоподобно-релевантные коллекции обысканы, новые поиски не приносят нового по теме) и draft_answer собирает всё найденное, пусть и скудное. False — ТОЛЬКО при конкретной причине ожидать от базы большего: необысканная правдоподобная коллекция или неиспробованные формулировки в коллекции, ещё дающей новое. И всегда False, если по теме не найдено ВООБЩЕ ничего: пустота — не ответ."
     )
     feedback: str = Field(
         default="",

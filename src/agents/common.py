@@ -125,10 +125,12 @@ def collection_search_stats(search_results: list[dict]) -> dict[str, dict]:
     Walks the accumulated entries in execution order (entries that errored are
     not searches and are skipped; empty results count — an empty search is the
     strongest exhaustion signal). Returns an insertion-ordered
-    {collection: {searches, retrieved, last_new, seqs_known}} where
-    `retrieved` is the set of distinct chunk seqs seen so far, `last_new` is
-    how many chunks of the LAST search were new vs all earlier searches of the
-    same collection, and `seqs_known=False` marks legacy tables without a seq
+    {collection: {searches, queries, retrieved, last_new, seqs_known}} where
+    `queries` lists the executed search queries in order (deduped — repeats
+    are the angle-starvation signal the judge/rewriter must see), `retrieved`
+    is the set of distinct chunk seqs seen so far, `last_new` is how many
+    chunks of the LAST search were new vs all earlier searches of the same
+    collection, and `seqs_known=False` marks legacy tables without a seq
     column (novelty can't be deduplicated → last_new=None, coverage omitted).
     """
     stats: dict[str, dict] = {}
@@ -138,9 +140,18 @@ def collection_search_stats(search_results: list[dict]) -> dict[str, dict]:
             continue
         st = stats.setdefault(
             collection,
-            {"searches": 0, "retrieved": set(), "last_new": None, "seqs_known": True},
+            {
+                "searches": 0,
+                "queries": [],
+                "retrieved": set(),
+                "last_new": None,
+                "seqs_known": True,
+            },
         )
         st["searches"] += 1
+        query = (r.get("subquery") or "").strip()
+        if query and query not in st["queries"]:
+            st["queries"].append(query)
         chunks = r.get("chunks") or []
         seqs = {s for s in (r.get("seqs") or []) if s is not None}
         if chunks and not seqs:
@@ -170,7 +181,11 @@ def _ru_new_chunks(n: int) -> str:
 
 
 def format_search_stats_for_judge(stats: dict[str, dict]) -> str:
-    """The judge's view: searched collections + last-search novelty delta."""
+    """The judge's view: searched collections, novelty delta, executed queries.
+
+    The queries ground the judge's "is there an untried angle?" call and keep
+    its «альтернативные формулировки» from repeating what was already tried.
+    """
     if not stats:
         return "(поисков ещё не было)"
     lines = []
@@ -178,6 +193,10 @@ def format_search_stats_for_judge(stats: dict[str, dict]) -> str:
         line = f"- {collection}: обыскана {_ru_times(st['searches'])}"
         if st["last_new"] is not None:
             line += f", последний поиск дал {_ru_new_chunks(st['last_new'])}"
+        if st["queries"]:
+            line += "\n  выполненные запросы: " + "; ".join(
+                f"«{q}»" for q in st["queries"]
+            )
         lines.append(line)
     return "\n".join(lines)
 
@@ -185,7 +204,12 @@ def format_search_stats_for_judge(stats: dict[str, dict]) -> str:
 def format_search_stats_for_planner(
     stats: dict[str, dict], totals: dict[str, int | None]
 ) -> str:
-    """The planner's view: searched collections + coverage «извлечено K/N (P%)»."""
+    """The planner's view: searches, coverage «извлечено K/N (P%)», novelty delta.
+
+    The delta is the planner's stop signal — «+0 новых» says a repeat visit
+    with similar wording is wasted; coverage alone misleads (a weak model reads
+    low coverage as "barely explored → dig the same spot again").
+    """
     if not stats:
         return "(пока нигде)"
     lines = []
@@ -195,6 +219,8 @@ def format_search_stats_for_planner(
         if total and st["seqs_known"]:
             k = len(st["retrieved"])
             line += f", извлечено {k}/{total} чанков ({round(100 * k / total)}%)"
+        if st["last_new"] is not None:
+            line += f", последний поиск дал {_ru_new_chunks(st['last_new'])}"
         lines.append(line)
     return "\n".join(lines)
 

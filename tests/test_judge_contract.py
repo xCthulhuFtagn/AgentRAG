@@ -202,6 +202,21 @@ def test_judge_stats_formatting():
     assert format_search_stats_for_judge({}) == "(поисков ещё не было)"
 
 
+def test_judge_stats_show_executed_queries():
+    # The judge must see which angles were already tried — both to judge
+    # "is there an untried angle?" and to avoid re-suggesting them.
+    stats = collection_search_stats(
+        [
+            {"collection": "lit", "subquery": "Пушкин биография", "chunks": ["a"], "seqs": [1]},
+            {"collection": "lit", "subquery": "Пушкин творчество", "chunks": ["a"], "seqs": [1]},
+        ]
+    )
+    text = format_search_stats_for_judge(stats)
+    assert "выполненные запросы" in text
+    assert "«Пушкин биография»" in text
+    assert "«Пушкин творчество»" in text
+
+
 def test_judge_stats_singular_plural():
     stats = collection_search_stats([{"collection": "lit", "chunks": ["a"], "seqs": [7]}])
     line = format_search_stats_for_judge(stats)
@@ -215,11 +230,42 @@ def test_planner_stats_coverage():
     )
     text = format_search_stats_for_planner(stats, {"lit": 10})
     assert "извлечено 3/10 чанков (30%)" in text
+    # The novelty delta is the planner's stop signal — shown alongside coverage
+    # (coverage alone reads as "barely explored → dig the same spot again").
+    assert "+3 новых чанка" in text
     # Unknown total (unreadable table) → coverage omitted, count still shown.
     text_no_total = format_search_stats_for_planner(stats, {"lit": None})
     assert "обыскана 1 раз" in text_no_total
     assert "извлечено" not in text_no_total
     assert format_search_stats_for_planner({}, {}) == "(пока нигде)"
+
+
+def test_planner_stats_exhaustion_delta():
+    stats = collection_search_stats(
+        [
+            {"collection": "lit", "chunks": ["a", "b"], "seqs": [1, 2]},
+            {"collection": "lit", "chunks": ["a", "b"], "seqs": [1, 2]},
+        ]
+    )
+    text = format_search_stats_for_planner(stats, {"lit": 100})
+    assert "+0 новых чанков" in text
+
+
+def test_queries_already_tried_per_collection():
+    from src.agents.query_rewriter import _queries_already_tried
+
+    results = [
+        {"collection": "lit", "subquery": "Пушкин биография", "chunks": ["a"]},
+        {"collection": "bio", "subquery": "клетка строение", "chunks": []},
+        {"collection": "lit", "subquery": "Пушкин биография", "chunks": ["a"]},  # dup
+        {"collection": "lit", "subquery": "Полтава Медный всадник", "chunks": []},
+        {"collection": "lit", "subquery": "упала", "error": "boom"},  # not a search
+    ]
+    assert _queries_already_tried(results, "lit") == [
+        "Пушкин биография",
+        "Полтава Медный всадник",
+    ]
+    assert _queries_already_tried(results, "geo") == []
 
 
 # ── Fanout: every executed search is recorded, empty ones included ──────────
