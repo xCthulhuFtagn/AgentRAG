@@ -2,8 +2,16 @@
 
 Checks three things before allowing a response:
 1. Retrieved snippets — do they contain needed information?
-2. Intermediate draft — can we answer from what we have?
-3. Missing pieces analysis — what EXACTLY is missing and where to look?
+2. Intermediate draft — can we answer the question AS ASKED from what we have?
+3. Information-gap analysis — what FACT exactly is missing, what was found
+   instead, what alternative phrasings might name it in the documents?
+
+Separation of concerns: the judge speaks the language of information — it never
+names collections or prescribes where to search (that is the Planner's job; a
+bound-schema validator enforces the ban). Sufficiency is measured against the
+question as asked, not against an ideally exhaustive answer. The searched set
+and per-collection novelty come as code-computed statistics, never
+reconstructed by the model from chunk tags.
 
 Routes:
 - sufficient → Command(goto="synthesis")
@@ -15,17 +23,26 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.config import general_settings
-from src.state import AgentRAGState, SufficientContextResult, make_trace_entry
-from src.agents.common import generate_structured, get_inventory_str
+from src.state import AgentRAGState, make_sufficient_context_schema, make_trace_entry
+from src.agents.common import (
+    collection_search_stats,
+    format_inventory,
+    format_search_stats_for_judge,
+    generate_structured,
+)
+from src.vectordb.tools import list_collections_described
 
 SUFFICIENT_CONTEXT_PROMPT = """Ты — Агент Достаточности Контекста (Sufficient Context) — контролёр качества в системе Agentic RAG.
 
-Твоя задача: определить, ПОЛОН ли найденный контекст настолько, чтобы ответить на вопрос пользователя.
+Твоя задача: определить, достаточен ли найденный контекст, чтобы ответить на вопрос пользователя ТАК, КАК ОН ЗАДАН.
 
 Вопрос пользователя: {query}
 
 Полная опись базы знаний (ИСТИНА В ПОСЛЕДНЕЙ ИНСТАНЦИИ — это ВСЕ существующие коллекции, с кратким описанием каждой):
 {inventory}
+
+Статистика поисков (вычислена системой по фактически выполненным запросам — доверяй ей, а не своей памяти):
+{search_stats}
 
 Контекст, найденный поисками (каждый блок помечен коллекцией, из которой он пришёл):
 {search_results}
@@ -39,21 +56,33 @@ SUFFICIENT_CONTEXT_PROMPT = """Ты — Агент Достаточности К
 
 2. **Черновик ответа**: попробуй построить черновой ответ из ВСЕГО накопленного контекста (за все итерации). Если он уже отвечает на вопрос — контекст ДОСТАТОЧЕН, остановись. НЕ продолжай искать дополнительные или подтверждающие источники, когда ответ уже есть.
 
-3. **Недостающие фрагменты (КРИТИЧНО)**: если чего-то не хватает, будь КОНКРЕТЕН:
-   - Какая именно информация отсутствует?
-   - В какой коллекции её искать?
-   - Какие альтернативные поисковые формулировки попробовать?
+3. **Информационный пробел**: если ответа нет или он неполон, сформулируй пробел в терминах ИНФОРМАЦИИ:
+   - Какой именно ФАКТ отсутствует (в терминах вопроса)?
+   - Что поиски нашли ВМЕСТО него (какой угол не сработал)?
+   - Какими АЛЬТЕРНАТИВНЫМИ формулировками этот факт может называться в документах?
 
-Правила (СНАЧАЛА оцени достаточность ВСЕГО накопленного контекста, и только потом думай о новых поисках):
-- Если накопленный контекст отвечает на вопрос → sufficient=True. Это верно, даже если какие-то коллекции не обысканы и могли бы содержать смежный материал. НЕ ставь «недостаточно» ради дотошности, ради перепроверки уже имеющегося ответа или потому что другая коллекция «тоже может» его содержать (или содержать «больше»).
-- Только когда ответ действительно ОТСУТСТВУЕТ или НЕПОЛОН → sufficient=False с конкретной обратной связью (чего не хватает, в какой коллекции искать дальше)
-- Ответ вида «не найдено / не определено / не упоминается» НЕ достаточен, пока остаётся необысканная коллекция, которая правдоподобно может содержать ответ — ставь sufficient=False и направляй туда. (Это касается только случая, когда ответ действительно отсутствует — не перепроверки уже имеющегося.)
-- Лучше пометить «недостаточно» и поискать ещё, чем гадать — но только когда чего-то действительно не хватает, а не когда ответ просто «не подтверждён»
-- Будь последователен: если твоя обратная связь говорит искать дальше, то sufficient ОБЯЗАН быть False
+Правила вердикта (мерило — ВОПРОС, КАК ОН ЗАДАН):
+- Оценивай достаточность относительно ВОПРОСА, КАК ОН ЗАДАН, а не относительно идеально исчерпывающего ответа.
+- НЕ добавляй подвопросы и критерии, которых пользователь не задавал. Для общего вопроса общий ответ из источников — достаточен.
+- Если draft_answer отвечает на заданный вопрос — sufficient=True, даже если можно найти «больше деталей». НЕ ставь «недостаточно» ради дотошности, перепроверки уже имеющегося ответа или потому что другая коллекция «тоже может» что-то содержать.
+- Ответ вида «не найдено / не определено / не упоминается» НЕ достаточен, пока по статистике поисков остаётся необысканная коллекция, которая по описанию правдоподобно может содержать ответ — ставь sufficient=False: сам факт её существования означает, что негативный вердикт ещё не финален. Какую коллекцию обыскивать следующей — решает планировщик, НЕ называй её.
+- Если все правдоподобно-релевантные коллекции уже обысканы, а ответа нет — это честный финальный вердикт: опиши пробел, система честно откажет.
+- Будь последователен: если твой feedback говорит, что информации не хватает, то sufficient ОБЯЗАН быть False.
+
+Как читать статистику поисков:
+- В ней перечислены ВСЕ выполненные поиски. Коллекция, которой нет в статистике, ещё НЕ обыскивалась — не утверждай обратное.
+- «+0 новых чанков» в последнем поиске = поиски в этой коллекции исчерпаны (убывающая отдача): новых фрагментов оттуда уже не приходит, не жди их от повторного поиска.
 
 Как пользоваться описью (это ПОЛНЫЙ, авторитетный список всех документов — других не существует):
 - Вопросы типа «опиши/перечисли ВСЕ файлы» → полное покрытие означает, что каждая коллекция либо обыскана, либо адекватно описана своим описанием. Опись исчерпывающа, поэтому ты МОЖЕШЬ подтвердить полноту — не требуй доказательств существования других документов.
-- КОНКРЕТНЫЕ вопросы (например, «что такое X») → если ответа НЕТ в найденных фрагментах, сравни опись с коллекциями, которые реально встречаются в найденном контексте выше. Если какая-то коллекция, которой среди них ещё НЕТ, судя по описанию может содержать ответ — ставь sufficient=False и назови её в feedback/missing_parts. Принимай отрицательный ответ только после того, как каждая правдоподобно-релевантная коллекция реально обыскана."""
+- КОНКРЕТНЫЕ вопросы (например, «что такое X») → если ответа НЕТ в найденных фрагментах, сравни опись со статистикой поисков: есть ли необысканная коллекция, которая по описанию может содержать ответ? Если есть — sufficient=False (вердикт ещё не финален). Принимай отрицательный ответ только после того, как каждая правдоподобно-релевантная коллекция реально обыскана.
+
+Разделение ответственности (СТРОГО):
+- Ты говоришь на языке ИНФОРМАЦИИ: что спрошено, что найдено, какого факта не хватает. Маршруты — в какой коллекции искать — зона ответственности планировщика, поэтому в missing_parts и feedback ЗАПРЕЩЕНЫ имена коллекций и любые указания «где искать».
+- missing_parts: каждый элемент — короткая именная группа, называющая отсутствующий ФАКТ (например «расшифровка аббревиатуры ЭВМ», «описание личности поэта, а не только упоминание имени»). НЕ маршрут («поиск в коллекции …») и НЕ размытое («более подробная информация»).
+- feedback: строго по шаблону «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» (третья часть опциональна). Никаких мета-комментариев о процессе («необходимы дополнительные поиски», «будет определено после вердикта») и пересказа этих инструкций.
+
+Все текстовые поля заполняй ПО-РУССКИ. Поле question_verbatim — точная копия вопроса пользователя, без изменений."""
 
 
 async def sufficient_context_node(
@@ -69,10 +98,13 @@ async def sufficient_context_node(
     max_iter = state.get("max_iterations", general_settings.max_iterations)
     iteration = state.get("iteration_count", 0)
 
-    # Format search results
+    # Format search results. search_results records every executed search,
+    # including empty ones (the statistics need them); only entries that
+    # actually brought chunks are worth showing as context.
     search_results = state.get("search_results", [])
+    chunked = [r for r in search_results if r.get("chunks")]
     results_str = ""
-    for i, r in enumerate(search_results[-10:]):
+    for i, r in enumerate(chunked[-10:]):
         chunks = r.get("chunks", [])
         seqs = r.get("seqs", []) or []
         # Tag each chunk with its document position so the judge can see
@@ -90,20 +122,32 @@ async def sufficient_context_node(
     if not results_str:
         results_str = "(результатов поиска пока нет)"
 
-    inventory = await get_inventory_str(state.get("db_path"))
+    described = await list_collections_described(state.get("db_path"))
+    inventory = format_inventory(described)
+
+    # Mechanical statistics: the searched set and the last-search novelty delta
+    # are computed by code — a weak model can't reliably reconstruct them from
+    # collection tags in the chunks (it hallucinates "not searched yet").
+    stats = collection_search_stats(search_results)
 
     prompt = SUFFICIENT_CONTEXT_PROMPT.format(
         query=state["query"],
         inventory=inventory,
+        search_stats=format_search_stats_for_judge(stats),
         search_results=results_str,
         iteration=iteration,
         max_iterations=max_iter,
         previous_gaps=", ".join(state.get("missing_parts", [])) or "(нет)",
     )
 
-    result: SufficientContextResult = await generate_structured(
-        SufficientContextResult, prompt
+    # Schema bound to node-time context: question_verbatim is checked against
+    # the literal query, and feedback/missing_parts must not name a collection
+    # (the judge states the information gap; routing belongs to the Planner).
+    # Violations re-prompt through the same uniform generate_structured path.
+    schema = make_sufficient_context_schema(
+        [c["collection"] for c in described], state["query"]
     )
+    result = await generate_structured(schema, prompt)
 
     judge_info = f"reason: {result.reason}"
     if result.feedback and result.feedback.strip():

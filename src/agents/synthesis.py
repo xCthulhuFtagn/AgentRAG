@@ -47,8 +47,11 @@ async def synthesis_node(
     """Synthesis: generate final answer, command END."""
     llm = get_llm(temperature=0.0)
 
+    # search_results records every executed search, empty ones included (the
+    # statistics need them) — only entries that brought chunks are sources.
+    chunked = [r for r in state.get("search_results", []) if r.get("chunks")]
     results_str = ""
-    for i, r in enumerate(state.get("search_results", [])):
+    for i, r in enumerate(chunked):
         chunks_str = "\n---\n".join(r.get("chunks", []))
         results_str += (
             f"\n### Источник {i+1}: {r.get('collection', 'неизвестно')}\n"

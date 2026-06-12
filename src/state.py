@@ -5,7 +5,8 @@ TypedDict with Annotated reducers for accumulation across iterations.
 
 import json
 import operator
-from typing import Annotated, Any, Optional, TypedDict
+import re
+from typing import Annotated, Any, Optional, Sequence, TypedDict
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -77,51 +78,157 @@ class SufficientContextResult(BaseModel):
 
     Schema-Guided Reasoning: fields follow the order a person would reason in,
     because structured output is generated field-by-field in declaration order.
-    First the analysis (reason), then the attempted answer (draft_answer), then
-    the gaps (missing_parts); then the `sufficient` verdict — grounded in all of
-    the above instead of committed up front and rationalized afterward (which let
-    "not found" drafts pass as True). `feedback` comes LAST of all: deciding what
-    to search next is a consequence of having concluded insufficiency, so it is
-    chosen after the verdict, not before it.
+    First `question_verbatim` — a literal COPY of the user's question (copying is
+    reliable even for weak models, unlike generating sub-questions), re-anchoring
+    the judge on the question as asked after ~tens of kB of chunks inflated its
+    idea of what was asked. Then the analysis (reason), the attempted answer
+    (draft_answer), the gaps (missing_parts); then the `sufficient` verdict —
+    grounded in all of the above instead of committed up front and rationalized
+    afterward (which let "not found" drafts pass as True). `feedback` comes LAST
+    of all: describing the information gap is a consequence of having concluded
+    insufficiency, so it is written after the verdict, not before it.
+
+    Separation of concerns: the judge speaks the language of INFORMATION (what
+    was asked, what was found, which fact is missing). Routing — which collection
+    to search next — belongs to the Planner, so collection names are banned from
+    `feedback`/`missing_parts` (enforced by make_sufficient_context_schema, which
+    knows the inventory).
     """
+    question_verbatim: str = Field(
+        description="САМОЕ ПЕРВОЕ: скопируй вопрос пользователя ДОСЛОВНО, символ в символ — ничего не добавляя, не сокращая и не перефразируя."
+    )
     reason: str = Field(
-        description="СНАЧАЛА анализ: содержат ли найденные фрагменты позитивный содержательный ответ на каждую часть вопроса? Укажи, что присутствует и что отсутствует."
+        description="Анализ: что из спрошенного в question_verbatim найденные фрагменты содержат, а чего в них нет. Оценивай относительно вопроса, КАК ОН ЗАДАН, — не добавляй подвопросов и критериев, которых пользователь не задавал."
     )
     draft_answer: str = Field(
         default="",
-        description="Лучший ответ, построенный ТОЛЬКО из найденного контекста. Если в контексте ответа нет — прямо так и напиши; не заполняй это поле из общих знаний.",
+        description="Лучший ответ на вопрос из question_verbatim, построенный ТОЛЬКО из найденного контекста. Если в контексте ответа нет — прямо так и напиши; не заполняй это поле из общих знаний.",
     )
     missing_parts: list[str] = Field(
         default_factory=list,
-        description="Конкретные всё ещё недостающие фрагменты. Пусто, если черновик уже отвечает на вопрос.",
+        description="Конкретные недостающие ФАКТЫ — каждый элемент короткая именная группа (например «расшифровка аббревиатуры ЭВМ»). НЕ маршруты и НЕ имена коллекций («поиск в коллекции …» — неправильно), НЕ размытое («более подробная информация»). Пусто, если черновик уже отвечает на вопрос.",
     )
 
     _coerce_missing = field_validator("missing_parts", mode="before")(_coerce_list)
     sufficient: bool = Field(
-        description="ВЕРДИКТ, выносится ПОСЛЕ reason/draft/missing выше. True ТОЛЬКО если draft_answer — позитивный содержательный ответ, опирающийся на найденные фрагменты. Черновик вида «не найдено / отсутствует / не упоминается» НЕ достаточен — ставь False, пока остаётся необысканная правдоподобно-релевантная коллекция."
+        description="ВЕРДИКТ, выносится ПОСЛЕ полей выше. True, если draft_answer отвечает на вопрос из question_verbatim, КАК ОН ЗАДАН, опираясь на найденные фрагменты, — даже если можно было бы найти «больше деталей». Черновик вида «не найдено / отсутствует / не упоминается» НЕ достаточен — ставь False, пока остаётся необысканная правдоподобно-релевантная коллекция."
     )
     feedback: str = Field(
         default="",
-        description="В САМОМ КОНЦЕ: только когда sufficient=False — конкретные указания для следующего поиска, закрывающие пробел (что искать и в какой коллекции).",
+        description="В САМОМ КОНЦЕ: только когда sufficient=False. Опиши ИНФОРМАЦИОННЫЙ пробел по шаблону: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» НЕ называй коллекции и не указывай, где искать — выбор источника не твоя задача.",
     )
 
     @model_validator(mode="after")
-    def _verdict_must_be_actionable(self):
-        # An "insufficient" verdict is only usable if it says what to do next:
-        # the Planner re-routes on `feedback`, and give_up reports `missing_parts`.
-        # If the judge said False but gave neither, reject it as a validation
-        # error — generate_structured re-prompts with this message and, if the
-        # model keeps failing, routes to give_up. Same uniform path as any other
-        # schema violation; no separate retry mechanism.
-        if not self.sufficient and not self.feedback.strip() and not self.missing_parts:
+    def _insufficient_verdict_is_actionable(self):
+        # An "insufficient" verdict is only usable if it describes the
+        # information gap: the Planner routes on `feedback`, give_up reports
+        # `missing_parts`. Violations raise — generate_structured re-prompts
+        # with this message and, if the model keeps failing, routes to give_up.
+        # Same uniform path as any other schema violation; no separate retry
+        # mechanism. The checks needing node-time context (collection names,
+        # the literal query) live in make_sufficient_context_schema.
+        if self.sufficient:
+            return self
+        feedback = self.feedback.strip()
+        if not feedback:
             raise ValueError(
-                "Когда sufficient=false, ОБЯЗАТЕЛЬНО укажи missing_parts "
-                "(конкретные недостающие фрагменты) и/или feedback (в какой "
-                "коллекции искать дальше и с каким запросом). Иначе поставь "
-                "sufficient=true, если найденный контекст действительно "
+                "Когда sufficient=false, ОБЯЗАТЕЛЬНО заполни feedback — опиши "
+                "информационный пробел по шаблону: «Не хватает: …. Найдено "
+                "вместо этого: …. Альтернативные формулировки: ….» Иначе "
+                "поставь sufficient=true, если найденный контекст действительно "
                 "отвечает на вопрос."
             )
+        lowered = feedback.casefold()
+        if "не хватает" not in lowered or "найдено вместо этого" not in lowered:
+            raise ValueError(
+                "feedback не следует шаблону. Когда sufficient=false, feedback "
+                "обязан иметь вид: «Не хватает: <какая информация отсутствует, "
+                "в терминах вопроса>. Найдено вместо этого: <что реально дали "
+                "поиски>. Альтернативные формулировки: <синонимы/термины, "
+                "которыми эта информация может называться в документах>.» — "
+                "третья часть опциональна. Без имён коллекций, без "
+                "мета-комментариев о процессе поиска."
+            )
+        if any(not part or not part.strip() for part in self.missing_parts):
+            raise ValueError(
+                "каждый элемент missing_parts должен быть непустой строкой — "
+                "короткой именной группой, называющей конкретный отсутствующий факт."
+            )
         return self
+
+
+def _normalize_question(s: str) -> str:
+    """Normalize a question for the verbatim-copy comparison.
+
+    Tolerates the trivial drift a weak model introduces when copying (case,
+    ё/е, whitespace runs, wrapping quotes, trailing punctuation) while still
+    rejecting paraphrase — the failure the check exists to catch.
+    """
+    s = (s or "").casefold().replace("ё", "е")
+    s = re.sub(r"\s+", " ", s).strip()
+    s = s.strip("«»\"'“”‘’ ").rstrip("?.!…")
+    return s.strip()
+
+
+def make_sufficient_context_schema(
+    collection_names: Sequence[str], query: str
+) -> type[SufficientContextResult]:
+    """SufficientContextResult bound to node-time context (inventory + query).
+
+    Two constraints can only be checked with information the node has — the
+    actual collection names and the literal user question — so they are baked
+    into a dynamic subclass as validators. That keeps every requirement a
+    Pydantic constraint flowing through the one uniform generate_structured
+    re-prompt path: no separate node-level retry loop.
+
+    - question_verbatim must be a (normalized-)literal copy of the user's query;
+    - feedback/missing_parts of an insufficient verdict must not name a
+      collection or prescribe where to search — the judge states the information
+      gap, the Planner owns routing. Weak models violate this regularly, hence a
+      mechanical check rather than a prompt-only rule.
+    """
+    # Tiny names (1–2 chars) would false-positive on ordinary words; routing
+    # leakage that matters always quotes a recognizable table name.
+    banned = sorted(
+        {n.strip().casefold() for n in collection_names if n and len(n.strip()) >= 3}
+    )
+    expected_question = _normalize_question(query)
+
+    class BoundSufficientContextResult(SufficientContextResult):
+        @model_validator(mode="after")
+        def _question_copied_verbatim(self):
+            if _normalize_question(self.question_verbatim) != expected_question:
+                raise ValueError(
+                    "question_verbatim должен быть ДОСЛОВНОЙ копией вопроса "
+                    f"пользователя: «{query}» — скопируй его без изменений, "
+                    "ничего не добавляя и не перефразируя."
+                )
+            return self
+
+        @model_validator(mode="after")
+        def _no_routes_in_information_fields(self):
+            if self.sufficient:
+                return self
+            fields = [("feedback", self.feedback)]
+            fields += [("missing_parts", part) for part in self.missing_parts]
+            for field_name, text in fields:
+                lowered = (text or "").casefold()
+                for name in banned:
+                    if name in lowered:
+                        raise ValueError(
+                            f"в поле {field_name} указан маршрут вместо "
+                            f"информационного пробела: «{name}» — это имя "
+                            "коллекции. НЕ называй коллекции и не указывай, где "
+                            "искать (это решает планировщик); опиши, КАКОЙ ФАКТ "
+                            "отсутствует."
+                        )
+            return self
+
+    # The class name is the function-calling tool name the model sees (and the
+    # name quoted in StructuredGenerationError) — keep it stable across binds.
+    BoundSufficientContextResult.__name__ = SufficientContextResult.__name__
+    BoundSufficientContextResult.__qualname__ = SufficientContextResult.__qualname__
+    return BoundSufficientContextResult
 
 
 # ── Graph State (TypedDict with Annotated reducers) ──

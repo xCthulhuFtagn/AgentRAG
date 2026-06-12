@@ -40,24 +40,30 @@ def _build_refusal_answer(state: AgentRAGState) -> str:
     iteration = state.get("iteration_count", 0)
     max_iter = state.get("max_iterations", general_settings.max_iterations)
 
-    # Summarize what was found
+    # Summarize what was searched vs what was found. search_results records
+    # every executed search (empty ones included), so the refusal can honestly
+    # distinguish "searched N collections" from "retrieved M chunks".
     search_results = state.get("search_results", [])
-    found_collections: set[str] = set()
+    searched_collections: set[str] = set()
     found_chunks = 0
     for r in search_results:
-        chunks = r.get("chunks", [])
-        if chunks:
-            found_collections.add(r.get("collection", "unknown"))
-            found_chunks += len(chunks)
+        collection = r.get("collection")
+        if collection and not r.get("error"):
+            searched_collections.add(collection)
+        found_chunks += len(r.get("chunks", []))
 
-    if found_collections:
+    if searched_collections:
         found_summary = (
-            f"- Searched {len(found_collections)} collection(s): "
-            f"{', '.join(sorted(found_collections))}\n"
+            f"- Searched {len(searched_collections)} collection(s): "
+            f"{', '.join(sorted(searched_collections))}\n"
+        )
+        found_summary += (
             f"- Retrieved {found_chunks} text chunks total\n"
+            if found_chunks
+            else "- No relevant text chunks were retrieved\n"
         )
     else:
-        found_summary = "- No relevant documents were found in any collection\n"
+        found_summary = "- No search was executed (no relevant collection was found)\n"
 
     # What's missing
     missing = state.get("missing_parts", []) or [

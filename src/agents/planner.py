@@ -6,13 +6,19 @@ fallback to a broad search or to a general-knowledge answer).
 No Send — all routes processed together in query_rewriter.
 """
 
+import asyncio
+
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, PlanResult, make_trace_entry
-from src.agents.common import generate_structured
+from src.agents.common import (
+    collection_search_stats,
+    format_search_stats_for_planner,
+    generate_structured,
+)
 from src.vectordb.config import vdb_settings
-from src.vectordb.tools import list_collections, list_collections_described
+from src.vectordb.tools import count_chunks, list_collections, list_collections_described
 
 PLANNER_PROMPT = """Ты — Агент-Планировщик (Planner) в системе Agentic RAG.
 
@@ -45,10 +51,21 @@ PLANNER_ITERATION_PROMPT = """Ты — Агент-Планировщик (Planne
 Всё ещё не хватает: {missing_parts}
 Обратная связь от проверяющего контекст: {feedback}
 
+Обратная связь описывает ИНФОРМАЦИОННЫЙ пробел: чего не хватает, что нашлось
+вместо него и какими альтернативными формулировками искомое может называться
+в документах. Она НЕ указывает коллекцию — выбор, ГДЕ искать, целиком твой:
+сопоставь пробел с описаниями коллекций и статистикой ниже. Альтернативные
+формулировки из обратной связи используй в subquery.
+
 Доступные коллекции:
 {collections}
 
-Где уже искали (ответа это НЕ дало): {searched}
+Где уже искали — статистика вычислена системой; ответа эти поиски НЕ дали:
+{searched}
+
+Покрытие «извлечено K/N чанков» — сигнал для МАРШРУТИЗАЦИИ, не вердикт:
+высокое покрытие означает, что коллекция практически исчерпана и возвращаться
+в неё бессмысленно; низкое покрытие само по себе НЕ повод искать именно там.
 
 Для каждой коллекции, которая правдоподобно может содержать недостающий фрагмент, создай RouteStep:
 - collection: точное имя таблицы (должно совпадать с одной из доступных)
@@ -92,14 +109,18 @@ async def planner_node(
     is_iteration = iteration > 0 and bool(feedback)
 
     if is_iteration:
-        searched_cols = sorted(
-            {
-                r.get("collection")
-                for r in state.get("search_results", [])
-                if r.get("collection")
-            }
+        # Mechanical coverage statistics (computed by code, the model only
+        # reads them): which collections were actually searched, how many times,
+        # and what fraction of their chunks is already retrieved — the routing
+        # signal that lets the planner skip exhausted collections.
+        stats = collection_search_stats(state.get("search_results", []))
+        totals = dict(
+            zip(
+                stats.keys(),
+                await asyncio.gather(*(count_chunks(c, db_path) for c in stats)),
+            )
         )
-        searched_str = ", ".join(searched_cols) if searched_cols else "(пока нигде)"
+        searched_str = format_search_stats_for_planner(stats, totals)
         prompt = PLANNER_ITERATION_PROMPT.format(
             query=state["query"],
             missing_parts=", ".join(state.get("missing_parts", [])) or "(не уточнено)",

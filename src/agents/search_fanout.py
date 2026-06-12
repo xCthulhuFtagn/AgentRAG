@@ -5,6 +5,11 @@ Parallelism via asyncio.gather for tool calls.
 
 Reads state["search_tasks"] = [{"collection": str, "query": str}], one concrete
 (collection, query) pair per planner route — no search-all mode.
+
+Every executed search is appended to state["search_results"] — empty results
+included. An empty search is data, not noise: the mechanical statistics
+(searched set, last-search novelty, coverage) are computed from this record,
+and a search that returned nothing is the strongest exhaustion signal.
 """
 
 import asyncio
@@ -71,7 +76,10 @@ async def search_fanout_node(
             }
 
     results = await asyncio.gather(*[search_one(c, q) for c, q in resolved])
-    results = [r for r in results if r.get("chunks")]
+    # Keep EVERY executed search, including empty ones: search_results is the
+    # record the mechanical statistics are computed from (searched set, «+0
+    # новых чанков» exhaustion detector, coverage). Consumers that render
+    # context (judge/synthesis/give_up) skip chunkless entries themselves.
 
     total_chunks = sum(len(r.get("chunks", [])) for r in results)
     collections_searched = sorted({c for c, _ in resolved})

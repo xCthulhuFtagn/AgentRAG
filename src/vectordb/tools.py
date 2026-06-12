@@ -149,6 +149,22 @@ async def gather_neighbors(
     return result
 
 
+async def count_chunks(collection: str, db_path: str | None = None) -> int | None:
+    """Total number of chunks (rows) in one collection, or None if unreadable.
+
+    Mechanical input for the Planner's coverage statistic («извлечено K/N
+    чанков») — computed by code, never reconstructed by the model. None (table
+    missing/corrupt) simply omits the coverage figure rather than failing the
+    node.
+    """
+    db = await get_async_db(db_path)
+    try:
+        table = await db.open_table(collection)
+        return await table.count_rows()
+    except Exception:
+        return None
+
+
 async def _list_table_names(db_path: str | None = None) -> list[str]:
     """Walk LanceDB's paginated table listing into a flat list of names."""
     db = await get_async_db(db_path)

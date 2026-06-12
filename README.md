@@ -51,7 +51,7 @@ finds no relevant route — initial turn or iteration — it goes straight to
 | **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; no relevant collection → Give Up |
 | **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); one search task per route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
-| **Sufficient Context** | Checks (1) snippets (2) draft answer (3) missing pieces → commands next step; also gets the full corpus inventory (ground truth) so it can confirm completeness on "describe all files" queries |
+| **Sufficient Context** | Judges sufficiency **against the question as asked** (it first copies it verbatim — an anti-inflation anchor); describes any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); gets the full corpus inventory (ground truth) plus code-computed search statistics |
 | **Synthesis** | Generates final answer with source citations; can describe every document from the inventory + retrieved chunks |
 | **Give Up** | System-generated refusal when context is exhausted; no LLM call |
 
@@ -142,15 +142,17 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 
 1. Sufficient Context Agent checks three things:
    - **Retrieved snippets** — do they contain the needed facts?
-   - **Draft answer** — can we construct a complete answer?
-   - **Missing pieces** — *what exactly* is missing and *where* to find it
-2. If insufficient + iterations left → returns `Command(goto="planner")` with `feedback="search for X in Y"` and `missing_parts`
-3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter. If it finds no relevant route, the Query Rewriter falls back to one targeted query across all collections
+   - **Draft answer** — does it answer the question **as asked**? (The schema's first field is a verbatim copy of the question — a copy-not-generate anchor so the verdict doesn't drift toward an "ideally exhaustive answer" after tens of kB of chunks)
+   - **Information gap** — *what fact* is missing, *what was found instead*, *what alternative phrasings* might name it in the documents
+2. If insufficient + iterations left → returns `Command(goto="planner")` with `missing_parts` and `feedback` following a strict template: *«Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….»* — pure information language. Naming a collection ("search in Y") is a **validation error**: the judge says *what* is missing, the Planner decides *where* to look (separation of concerns, enforced by schema + re-prompt)
+3. Planner re-routes: it re-plans to the collection(s) most likely to hold the missing piece (alternative keywords / different angle), then hands the new routes to the Query Rewriter. If it finds no relevant route, it goes straight to Give Up (pure RAG — no broad fallback)
 4. Search Fanout searches again → Sufficient Context checks again
 5. If max iterations reached and still insufficient → `Command(goto="give_up")`
-6. Give Up node builds an honest refusal: what was found, what's missing, why
+6. Give Up node builds an honest refusal: what was searched, what was found, what's missing, why
 
-The Sufficient Context Agent also receives the **complete corpus inventory** (every collection + its description) as ground truth. Without it, "describe all the files in the knowledge base"-type queries could never satisfy the judge — vector search returns similar chunks but never proves it has seen *every* document, so the loop always ran to `give_up`. With the inventory the judge can confirm full coverage and Synthesis can describe each document from its summary.
+Both loop participants read **mechanical search statistics** computed by code from the record of executed searches (empty searches are recorded too — never reconstructed by the model from chunk tags, which weak models hallucinate about): the judge sees the searched set plus the last-search novelty delta (*«обыскана 3 раза, последний поиск дал +0 новых чанков»* — a diminishing-returns exhaustion signal), the Planner sees per-collection coverage (*«извлечено 28/210 чанков (13%)»* — a routing signal, never a verdict criterion).
+
+The Sufficient Context Agent also receives the **complete corpus inventory** (every collection + its description) as ground truth. Without it, "describe all the files in the knowledge base"-type queries could never satisfy the judge — vector search returns similar chunks but never proves it has seen *every* document, so the loop always ran to `give_up`. With the inventory the judge can confirm full coverage, and for specific questions a *negative* answer only becomes final once every plausibly-relevant collection has actually been searched. Synthesis uses the same inventory to describe each document from its summary.
 
 ## Vector store (LanceDB)
 
