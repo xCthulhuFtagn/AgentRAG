@@ -155,6 +155,15 @@ def test_bound_schema_keeps_function_calling_name():
     assert schema.__name__ == "SufficientContextResult"
 
 
+def test_bound_schema_keeps_tool_description():
+    # The docstring ships as the function-calling tool description; a subclass
+    # gets __doc__=None unless the factory copies it, and langchain-gigachat
+    # rejects a tool whose description is empty.
+    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    description = schema.model_json_schema().get("description", "")
+    assert description.strip()
+
+
 def test_bound_rejects_paraphrased_question():
     schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
     with pytest.raises(ValidationError, match="ДОСЛОВНОЙ"):

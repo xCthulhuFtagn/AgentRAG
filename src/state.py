@@ -230,6 +230,10 @@ def make_sufficient_context_schema(
     # name quoted in StructuredGenerationError) — keep it stable across binds.
     BoundSufficientContextResult.__name__ = SufficientContextResult.__name__
     BoundSufficientContextResult.__qualname__ = SufficientContextResult.__qualname__
+    # The docstring ships as the tool description in the function-calling
+    # schema, and a subclass does not inherit __doc__ (it gets None) —
+    # langchain-gigachat rejects a tool whose description is empty.
+    BoundSufficientContextResult.__doc__ = SufficientContextResult.__doc__
     return BoundSufficientContextResult
 
 
