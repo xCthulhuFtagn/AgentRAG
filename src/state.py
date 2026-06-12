@@ -121,39 +121,30 @@ class SufficientContextResult(BaseModel):
     )
     feedback: str = Field(
         default="",
-        description="В САМОМ КОНЦЕ: только когда sufficient=False. Опиши ИНФОРМАЦИОННЫЙ пробел по шаблону: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» НЕ называй коллекции и не указывай, где искать — выбор источника не твоя задача.",
+        description="В САМОМ КОНЦЕ: только когда sufficient=False. Опиши ИНФОРМАЦИОННЫЙ пробел; удобная форма: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» НЕ называй коллекции и не указывай, где искать — выбор источника не твоя задача.",
     )
 
     @model_validator(mode="after")
     def _insufficient_verdict_is_actionable(self):
-        # An "insufficient" verdict is only usable if it describes the
-        # information gap: the Planner routes on `feedback`, give_up reports
-        # `missing_parts`. Violations raise — generate_structured re-prompts
-        # with this message and, if the model keeps failing, routes to give_up.
-        # Same uniform path as any other schema violation; no separate retry
-        # mechanism. The checks needing node-time context (collection names,
-        # the literal query) live in make_sufficient_context_schema.
+        # Validate only what CODE consumes; what an LLM consumes is guided by
+        # the prompt, not policed. feedback's only consumer is the Planner
+        # reading prose — but its PRESENCE is a code contract: the Planner's
+        # iteration mode keys off bool(feedback), so an empty one at False
+        # would silently demote it to initial-plan mode. The template in the
+        # field description is guidance, deliberately NOT enforced: a label
+        # check rejects semantically-good feedback worded differently, and a
+        # re-prompt burned on formatting can escalate a correct verdict into
+        # give_up. Checks needing node-time context (collection names, the
+        # literal query) live in make_sufficient_context_schema.
         if self.sufficient:
             return self
-        feedback = self.feedback.strip()
-        if not feedback:
+        if not self.feedback.strip():
             raise ValueError(
                 "Когда sufficient=false, ОБЯЗАТЕЛЬНО заполни feedback — опиши "
-                "информационный пробел по шаблону: «Не хватает: …. Найдено "
-                "вместо этого: …. Альтернативные формулировки: ….» Иначе "
-                "поставь sufficient=true, если найденный контекст действительно "
-                "отвечает на вопрос."
-            )
-        lowered = feedback.casefold()
-        if "не хватает" not in lowered or "найдено вместо этого" not in lowered:
-            raise ValueError(
-                "feedback не следует шаблону. Когда sufficient=false, feedback "
-                "обязан иметь вид: «Не хватает: <какая информация отсутствует, "
-                "в терминах вопроса>. Найдено вместо этого: <что реально дали "
-                "поиски>. Альтернативные формулировки: <синонимы/термины, "
-                "которыми эта информация может называться в документах>.» — "
-                "третья часть опциональна. Без имён коллекций, без "
-                "мета-комментариев о процессе поиска."
+                "информационный пробел: какая информация отсутствует, что "
+                "поиски дали вместо неё, какими ещё формулировками она может "
+                "называться. Иначе поставь sufficient=true, если найденный "
+                "контекст действительно отвечает на вопрос."
             )
         if any(not part or not part.strip() for part in self.missing_parts):
             raise ValueError(

@@ -1,11 +1,12 @@
 """Contract tests: the Sufficient Context judge schema and mechanical search stats.
 
 The judge speaks the language of INFORMATION — sufficiency is judged against the
-question as asked (question_verbatim, copied not generated), an insufficient
-verdict must describe the gap via the «Не хватает / Найдено вместо этого»
-template, and naming a collection (routing — the Planner's job) is a validation
-error that re-prompts. The searched set / novelty / coverage are computed by
-code (collection_search_stats), never reconstructed by the model.
+question as asked (question_verbatim, copied not generated). Validation covers
+only what CODE consumes: feedback presence at sufficient=False (the Planner's
+iteration mode keys off it) and the collection-name ban (routing is the
+Planner's job); feedback's FORM is prompt guidance, deliberately not enforced.
+The searched set / novelty / coverage are computed by code
+(collection_search_stats), never reconstructed by the model.
 """
 
 import sys
@@ -67,21 +68,27 @@ def test_sufficient_true_needs_no_feedback():
 
 
 def test_insufficient_without_feedback_is_rejected():
-    # missing_parts alone is no longer enough: the Planner routes on feedback,
-    # and an empty feedback used to silently demote it to initial-plan mode.
-    with pytest.raises(ValidationError, match="Не хватает"):
+    # missing_parts alone is not enough: the Planner routes on feedback, and
+    # an empty feedback at False would silently demote it to initial-plan mode
+    # (is_iteration keys off bool(feedback)) — presence is a CODE contract.
+    with pytest.raises(ValidationError, match="ОБЯЗАТЕЛЬНО заполни feedback"):
         SufficientContextResult(
             **judge_fields(sufficient=False, feedback="", missing_parts=["описание Пушкина"])
         )
 
 
-def test_insufficient_feedback_must_follow_template():
-    # Meta-commentary / free-form advice instead of the information-gap
-    # template — the regular failure mode of a weak model.
-    with pytest.raises(ValidationError, match="шаблону"):
-        SufficientContextResult(
-            **judge_fields(sufficient=False, feedback="Необходимы дополнительные поиски")
+def test_insufficient_free_form_feedback_is_valid():
+    # Form is guidance, not law: the only consumer of feedback is the
+    # Planner-LLM reading prose, so semantically useful feedback worded
+    # off-template must NOT be rejected — a re-prompt burned on formatting
+    # can escalate a correct verdict into give_up.
+    result = SufficientContextResult(
+        **judge_fields(
+            sufficient=False,
+            feedback="Отсутствует характеристика Пушкина; поиски дали только списки произведений.",
         )
+    )
+    assert result.sufficient is False
 
 
 def test_insufficient_with_template_feedback_passes():
