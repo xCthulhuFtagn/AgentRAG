@@ -43,8 +43,23 @@ def get_lock(pid: str) -> asyncio.Lock:
 
 
 def start_progress(pid: str) -> None:
-    """Reset progress at the start of a reindex (all files pending)."""
+    """Reset progress at the start of a full reindex (all files pending)."""
     _progress[pid] = {}
+
+
+def init_partial_progress(pid: str, pending: set[str], present: set[str]) -> None:
+    """Progress at the start of an incremental update.
+
+    Only `pending` files show as in-progress; the untouched rest of `present`
+    show as already indexed (keeping any earlier failure flags); entries for
+    files no longer on disk are dropped.
+    """
+    prog = {n: ok for n, ok in _progress.get(pid, {}).items() if n in present}
+    for name in present - pending:
+        prog.setdefault(name, True)
+    for name in pending:
+        prog.pop(name, None)
+    _progress[pid] = prog
 
 
 def mark_file(pid: str, filename: str, ok: bool) -> None:

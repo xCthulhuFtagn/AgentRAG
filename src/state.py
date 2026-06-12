@@ -244,6 +244,11 @@ class AgentRAGState(TypedDict):
     # None → global LANCE_DB_PATH (CLI default).
     db_path: Optional[str]
 
+    # Per-project neighbor-stitching overrides for search_fanout:
+    # {"expand_padding": int, "bridge_gap": int}. None / missing keys →
+    # the global vdb_settings values (CLI default).
+    stitch_settings: Optional[dict]
+
     # Planner
     plan_steps: list[dict]
     # Current route being processed (set by Planner)
@@ -284,15 +289,19 @@ def make_initial_state(
     query: str,
     max_iterations: int = 3,
     db_path: Optional[str] = None,
+    stitch_settings: Optional[dict] = None,
 ) -> AgentRAGState:
     """Create a clean initial state for the graph.
 
     db_path scopes vector search to one LanceDB (per-project isolation).
     None → global LANCE_DB_PATH (CLI default, backward-compatible).
+    stitch_settings carries per-project neighbor-stitching overrides
+    (expand_padding/bridge_gap) into search_fanout; None → vdb_settings.
     """
     return AgentRAGState(
         query=query,
         db_path=db_path,
+        stitch_settings=stitch_settings,
         plan_steps=[],
         current_route=None,
         rewritten_queries=[],

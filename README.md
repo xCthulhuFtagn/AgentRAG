@@ -115,8 +115,9 @@ needed. PaddleOCR (`ocr/paddleocr`, `:8829`) works the same way — just change 
 A Python-only UI: **projects on the left, chat on the right**.
 
 - Create / rename / delete / open projects (green theme).
-- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & reindex** applies everything at once (one reindex); **Cancel** discards.
-- That single reindex **freezes** the chat (turns blue, trembles, snows ❄) until it finishes — sending is blocked, but you can still open/return to the frozen chat to watch it. The freeze tracks the project's reindex status live, so switching chats and back keeps it correct.
+- Each project holds uploaded files (`.pdf/.docx/.pptx/.txt/.md`). **"Edit files"** opens a staging session: add / rename / delete as many as you want — nothing touches disk yet. **Done & update index** applies everything at once and indexes **only the delta**: new/replaced/renamed files are (re)indexed, deleted files' tables are dropped, untouched files keep their existing tables; **Cancel** discards.
+- **Indexing settings** (first item in a project's ⋮ menu) opens a dialog with the project's vector-DB hyperparameters: chunk size, chunk overlap, LLM file descriptions on/off, description excerpt size (index-time), plus the two neighbor-stitching knobs — stitch padding and merge gap (search-time). Global `.env` values are the defaults; saved per project in its `meta.json`. On the first change a red **Apply** button appears; it is honest about cost: if any *index-time* value changed it reads **Apply — full reindex** and rebuilds the whole project index (old chunks were cut with the old settings), while a stitching-only change just saves and applies from the next search — no reindex. Closing without changes does nothing.
+- Indexing **freezes** the chat (turns blue, trembles, snows ❄) until it finishes — sending is blocked, but you can still open/return to the frozen chat to watch it. The freeze tracks the project's reindex status live, so switching chats and back keeps it correct.
 - Chat streams the **live agent trace** (planner → rewrite → search → sufficient) then the final answer.
 - Projects are **isolated** — each has its own LanceDB, so search never leaks across projects.
 
@@ -138,7 +139,7 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 ├── app.py                #   ui.run(root=index): projects + chat, green theme, frozen-chat CSS
 ├── projects.py           #   ProjectStore — filesystem CRUD (data/projects, data/lancedb)
 ├── runtime.py            #   GRAPH (built once), STORE, per-project status + locks
-├── indexing.py           #   reindex_project() — wipe + rebuild project DB
+├── indexing.py           #   reindex_project() — wipe + rebuild; update_project_index() — incremental delta
 ├── chat.py               #   run_chat() — streams astream events, fresh thread per message
 └── static/style.css      #   green theme + .frozen (blue + tremble)
 ```
@@ -195,7 +196,8 @@ Everything lives under `data/` (created automatically). The CLI's global DB is j
 
 ### Reindexing & persistence
 
-- Editing a project's files commits a batch, then **reindexes**: the project's `data/lancedb/{id}` dir is wiped and rebuilt from the current files ([indexing.py](web/indexing.py)). This keeps the index consistent with deletes/renames. Each table is also `drop_table`-then-`create_table` on every run.
+- Editing a project's files commits a batch, then indexes **only the delta** ([indexing.py](web/indexing.py)): added/replaced/renamed files get their tables rebuilt (`index_files`, incremental — the file's previous table is found via the descriptions sidecar and dropped first), deleted files' tables are dropped (`remove_files_from_index`), and untouched files are never re-embedded. The descriptions sidecar is merged, not overwritten.
+- A **full** wipe-and-rebuild of `data/lancedb/{id}` still happens when the project's *index-time* settings change (old chunks were cut with the old settings) — the *Apply* button in the Indexing-settings dialog. Stitching-only changes skip the rebuild: they're read at search time.
 - Data persists between runs — restart the app/CLI and the tables are still there. Deleting a project removes both its files and its LanceDB dir.
 
 ## Configuration
@@ -225,6 +227,7 @@ EMBEDDING_CACHE_DIR=./data/fastembed_cache   # where the ~252MB ONNX model lives
 CHUNK_SIZE=1000                              # chunk target, chars (new docs only)
 CHUNK_OVERLAP=150                            # chunk overlap, chars
 DESCRIPTIONS_ENABLED=true                    # LLM file summary at index time; Planner routes with it
+DESCRIBE_MAX_CHARS=6000                      # leading chars of a file sent to the LLM for its description
 SEARCH_TOP_K=5                               # nearest chunks per (collection, query) before stitching
 
 # ── Neighbor stitching (vdb_settings) ──
@@ -239,5 +242,6 @@ MAX_EXPANDED=16                              # cap on stitched chunks per result
 - **Whole-block retrieval** — if answers to "list the whole X" (table of contents, references) still truncate, raise `EXPAND_PADDING` (reach further from each hit) or `BRIDGE_GAP` (tolerate larger holes between relevant regions). The effective hit-merge distance is `2*EXPAND_PADDING + BRIDGE_GAP + 1`. `MAX_EXPANDED` caps how much a single result can grow.
 - **Chunk granularity** — larger `CHUNK_SIZE` packs more context per chunk (fewer, coarser chunks → better for whole-section reads, worse precision); smaller is the opposite. `CHUNK_OVERLAP` carries context across boundaries. Changing either only affects **newly indexed** documents — reindex to apply.
 - **Embedding model** — `EMBEDDING_MODEL` is a footgun: a different model means a different vector dimension, so existing tables become incompatible. **Reindex every project after changing it.**
+- **Per-project overrides (web)** — `CHUNK_SIZE`, `CHUNK_OVERLAP`, `DESCRIPTIONS_ENABLED`, `DESCRIBE_MAX_CHARS` plus the stitching knobs `EXPAND_PADDING` and `BRIDGE_GAP` can be overridden per project in the *Indexing settings* dialog; the `.env` values above are the defaults for projects that never changed them. Applying an index-time override triggers that project's full reindex; stitching overrides apply from the next search (they're threaded through graph state into `gather_neighbors`).
 
-> Changes to chunking/embedding settings require a **reindex** to take effect (web: *Edit files → Done & reindex*; CLI: re-run the indexer). Search/stitching settings (`SEARCH_TOP_K`, `EXPAND_PADDING`, `BRIDGE_GAP`, `MAX_EXPANDED`) apply immediately on the next query — no reindex needed.
+> Changes to chunking/embedding settings require a **reindex** to take effect (web: the *Indexing settings* dialog's **Apply** does it; CLI: re-run the indexer). Search/stitching settings (`SEARCH_TOP_K`, `EXPAND_PADDING`, `BRIDGE_GAP`, `MAX_EXPANDED`) apply immediately on the next query — no reindex needed.

@@ -39,6 +39,13 @@ body,
 /* "Open in chat" button colors come from Quasar props (color/text-color),
    which reliably beat Quasar's own bg-primary — no CSS override needed here. */
 
+/* Indexing-settings dialog — same look as a project card. */
+.settings-card {
+  background: #ffffff;
+  border: 1px solid #86efac;     /* green-300 */
+  border-radius: 10px;
+}
+
 /* Frozen state: chat panel and the "Open in chat" button turn blue and tremble */
 .frozen {
   background: #dbeafe !important;            /* blue-100 */

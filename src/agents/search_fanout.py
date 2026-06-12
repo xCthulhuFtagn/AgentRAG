@@ -28,6 +28,16 @@ async def search_fanout_node(
     """Search Fanout: execute vector searches, command sufficient_context."""
     db_path = state.get("db_path")
 
+    # Per-project stitching overrides (web threads them via make_initial_state);
+    # missing keys fall back to the global vdb_settings defaults.
+    stitch = state.get("stitch_settings") or {}
+    padding = stitch.get("expand_padding")
+    bridge_gap = stitch.get("bridge_gap")
+    stitch_kwargs = {
+        "padding": vdb_settings.expand_padding if padding is None else padding,
+        "bridge_gap": vdb_settings.bridge_gap if bridge_gap is None else bridge_gap,
+    }
+
     # Each task targets one concrete collection (query_rewriter built them from
     # the planner's routes); search every (collection, query) pair in parallel.
     resolved: list[tuple[str, str]] = [
@@ -52,7 +62,8 @@ async def search_fanout_node(
             # reference lists) come back whole. Legacy tables (no seq) → no-op.
             if seqs and any(s is not None for s in seqs):
                 expanded = await gather_neighbors(
-                    result.get("collection", collection), seqs, db_path
+                    result.get("collection", collection), seqs, db_path,
+                    **stitch_kwargs,
                 )
                 if expanded:
                     chunks = [e["text"] for e in expanded]
