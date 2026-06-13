@@ -1,16 +1,21 @@
 """Sufficient Context Agent — the key innovation from Google Research.
 
-The judge answers ONE question — a retrieval-state call, not a grade against an
-ideal answer: would one more search of THIS corpus materially improve the
-answer to the question as asked?
-- No, because the answer is found → sufficient.
-- No, because the corpus is exhausted on the topic (every plausible collection
-  searched to diminishing returns) → sufficient too, even if the findings are
-  thin: "the sources contain only …" is the system's honest answer.
-- Zero findings are never sufficient — that path stays an honest refusal.
-- Yes (an unsearched plausible collection, or an untried angle in a collection
-  still yielding new on-topic chunks) → insufficient, with the information gap
-  described in feedback.
+The judge classifies the RETRIEVAL STATE (SGR Routing — a closed set of named
+situations, not a quality grade against an ideal answer): which `verdict` are
+we in?
+- «ответ_найден» — the answer is in the chunks → synthesis.
+- «исчерпано_есть_упоминания» — the corpus is exhausted on the topic (every
+  plausible collection searched to diminishing returns) and the draft collects
+  the thin findings → synthesis too: "the sources contain only …" is the
+  system's honest answer.
+- «есть_необысканная_коллекция» / «есть_неиспробованный_угол» — a route remains
+  (an unsearched plausible collection, or an untried angle in a collection still
+  yielding new on-topic chunks) → re-route, with the gap described in feedback.
+- «ничего_не_найдено» — zero mentions AND nowhere left → honest refusal.
+
+A bool muddled two axes (route availability vs. what was found) and let a weak
+model rationalize a thin-but-complete answer into "insufficient"; the named
+situations split the axes and remove the quality-grade framing.
 
 Separation of concerns: the judge speaks the language of information — it never
 names collections or prescribes where to search (that is the Planner's job; a
@@ -18,17 +23,23 @@ bound-schema validator enforces the ban). The searched set, per-collection
 novelty and the executed queries come as code-computed statistics, never
 reconstructed by the model from chunk tags.
 
-Routes:
-- sufficient → Command(goto="synthesis")
-- insufficient + iterations left → Command(goto="planner") with feedback (re-route)
-- insufficient + max iterations → Command(goto="give_up")
+Routes (verdict → outcome):
+- SYNTHESIS_VERDICTS → Command(goto="synthesis")
+- CONTINUE_VERDICTS + iterations left → Command(goto="planner") with feedback
+- «ничего_не_найдено», or CONTINUE at max iterations → Command(goto="give_up")
 """
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.config import general_settings
-from src.state import AgentRAGState, make_sufficient_context_schema, make_trace_entry
+from src.state import (
+    CONTINUE_VERDICTS,
+    SYNTHESIS_VERDICTS,
+    AgentRAGState,
+    make_sufficient_context_schema,
+    make_trace_entry,
+)
 from src.agents.common import (
     collection_search_stats,
     format_inventory,
@@ -39,10 +50,7 @@ from src.vectordb.tools import list_collections_described
 
 SUFFICIENT_CONTEXT_PROMPT = """Ты — Агент Достаточности Контекста в системе Agentic RAG, которая отвечает СТРОГО по локальной базе документов.
 
-ТВОЯ ЗАДАЧА — ровно одно решение: ДАСТ ЛИ ЕЩЁ ОДИН ПОИСК ПО БАЗЕ материал, который заметно улучшит ответ на вопрос, как он задан?
-- Даст → sufficient=False (поиск продолжится).
-- Не даст → sufficient=True (система отвечает тем, что нашла).
-Ты оцениваешь состояние ПОИСКА относительно ЭТОЙ базы, а не качество ответа по абсолютной шкале: максимум возможного ответа системы — всё, что база содержит по теме вопроса.
+ТВОЯ ЗАДАЧА — определить, в каком СОСТОЯНИИ ПОИСКА мы находимся, и выбрать ровно одну ситуацию (поле verdict). Это НЕ оценка качества ответа по абсолютной шкале: максимум возможного ответа системы — всё, что база содержит по теме вопроса. Тощий, но честный ответ из исчерпанной базы — это полноценный ответ, а НЕ повод искать дальше.
 
 Вопрос пользователя: {query}
 
@@ -57,31 +65,35 @@ SUFFICIENT_CONTEXT_PROMPT = """Ты — Агент Достаточности К
 
 Алгоритм решения:
 
-1. Перечитай вопрос и скопируй его в question_verbatim ДОСЛОВНО. Оценивай только то, что спрошено. Краткий или общий вопрос («пушкин», «расскажи про X») означает «что в базе есть про это» — НЕ превращай его в анкету (биография, даты, список произведений…), которой пользователь не заказывал.
+1. Оценивай ТОЛЬКО то, что спрошено, как оно задано. Краткий или общий вопрос («пушкин», «расскажи про X») означает «что в базе есть про это» — НЕ превращай его в анкету (биография, даты, список произведений…), которой пользователь не заказывал.
 
 2. Построй draft_answer — лучший ответ из ВСЕГО накопленного контекста (за все итерации). Включи всё, что фрагменты реально говорят по теме вопроса, даже если это немного: отдельные упоминания и косвенные факты — тоже материал ответа.
 
-3. Вынеси вердикт sufficient:
+3. Заполни retrieval_state — проговори по статистике, остались ли вообще маршруты: (а) есть ли в описи правдоподобно-релевантная коллекция, которой НЕТ в статистике; (б) даёт ли хоть одна обысканная коллекция новое по теме, или последний поиск везде «+0 новых»/не по теме.
 
-   True, если верно ЛЮБОЕ из двух:
-   • draft_answer отвечает на вопрос, как он задан, — даже если можно было бы накопать «больше деталей»: не продолжай поиск ради дотошности или перепроверки;
-   • база ИСЧЕРПАНА по теме вопроса: каждая правдоподобно-релевантная по описи коллекция уже обыскана, и последние поиски не приносят нового ПО ТЕМЕ (новые чанки не о том — тоже исчерпанность), а draft_answer собирает всё найденное, пусть и скудное. «В источниках об этом есть только …» — полноценный честный ответ системы.
+4. Выбери verdict — РОВНО ОДНУ ситуацию:
 
-   False — ТОЛЬКО если есть конкретная причина ожидать от базы большего:
-   • в описи есть НЕобысканная коллекция (её нет в статистике), по описанию способная содержать ответ; или
-   • релевантная коллекция ещё отдаёт новое по теме, и есть неиспробованный угол поиска — формулировки, которых нет среди выполненных запросов в статистике (назови их в feedback).
-   И всегда False, если по теме не найдено ВООБЩЕ ничего, ни одного упоминания: пустоту нельзя выдать за ответ — система честно откажет, когда маршрутов не останется.
+   Поиск можно ЗАВЕРШИТЬ (система отвечает тем, что нашла):
+   • «ответ_найден» — draft_answer отвечает на вопрос, как он задан. Не продолжай ради дотошности или перепроверки.
+   • «исчерпано_есть_упоминания» — каждая правдоподобно-релевантная коллекция обыскана, последние поиски не приносят нового ПО ТЕМЕ (новые чанки не о том — тоже исчерпанность), а draft_answer собрал всё найденное, пусть и скудное. «В источниках об этом есть только …» — это и есть честный ответ.
+
+   Поиск стоит ПРОДОЛЖИТЬ (есть конкретная причина ждать от базы большего):
+   • «есть_необысканная_коллекция» — в описи есть коллекция, которой НЕТ в статистике, и по описанию она правдоподобно может содержать ответ.
+   • «есть_неиспробованный_угол» — релевантная коллекция ещё отдаёт НОВЫЕ по теме чанки (её последний поиск НЕ «+0») и есть неиспробованная формулировка, которой нет среди выполненных запросов. Назови её в feedback.
+
+   Поиск ИСЧЕРПАН и ответа нет:
+   • «ничего_не_найдено» — по теме нет НИ ОДНОГО упоминания, и искать больше негде (все правдоподобные коллекции обысканы). Пустоту нельзя выдать за ответ — система честно откажет.
 
 Как читать статистику:
 - В ней перечислены ВСЕ выполненные поиски и их запросы. Коллекции, которых нет в статистике, ещё НЕ обыскивались — не утверждай обратное.
-- «+0 новых чанков» = эти формулировки в этой коллекции исчерпаны; похожий запрос вернёт то же самое.
+- «+0 новых чанков» = эти формулировки в этой коллекции ИСЧЕРПАНЫ; похожий запрос вернёт то же самое. Для такой коллекции выбирать «есть_неиспробованный_угол» НЕЛЬЗЯ — это и есть сигнал исчерпанности, а не повод искать там же ещё раз.
 - Выполненные запросы показывают уже испробованные углы — не предлагай их повторно в «альтернативных формулировках».
 
 Опись и вопросы «опиши/перечисли ВСЕ файлы»: полнота достигнута, когда каждая коллекция либо обыскана, либо адекватно покрыта своим описанием. Опись исчерпывающа — не требуй доказательств существования других документов.
 
 Разделение ответственности (СТРОГО): ты говоришь на языке ИНФОРМАЦИИ — что спрошено, что найдено, какого ФАКТА не хватает. ГДЕ искать — решает планировщик, поэтому в missing_parts и feedback ЗАПРЕЩЕНЫ имена коллекций и любые указания «поищи в …».
-- missing_parts: короткие именные группы, называющие отсутствующие факты (например «расшифровка аббревиатуры ЭВМ»). НЕ маршруты («поиск в коллекции …») и НЕ размытое («более подробная информация»).
-- feedback (только при sufficient=False) — опиши информационный пробел; удобная форма: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» (третья часть опциональна). Без мета-комментариев о процессе и пересказа этих инструкций.
+- missing_parts: короткие именные группы, называющие отсутствующие факты (например «расшифровка аббревиатуры ЭВМ»). НЕ маршруты («поиск в коллекции …») и НЕ размытое («более подробная информация»). Пустой список, если ответ найден.
+- feedback (только при «есть_необысканная_коллекция»/«есть_неиспробованный_угол») — опиши информационный пробел; удобная форма: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» (третья часть опциональна). Без мета-комментариев о процессе и пересказа этих инструкций. Для остальных вердиктов — пустая строка.
 
 Все текстовые поля заполняй ПО-РУССКИ."""
 
@@ -144,22 +156,19 @@ async def sufficient_context_node(
         search_results=results_str,
     )
 
-    # Schema bound to node-time context: question_verbatim is checked against
-    # the literal query, and feedback/missing_parts must not name a collection
-    # (the judge states the information gap; routing belongs to the Planner).
-    # Violations re-prompt through the same uniform generate_structured path.
-    schema = make_sufficient_context_schema(
-        [c["collection"] for c in described], state["query"]
-    )
+    # Schema bound to node-time context: feedback/missing_parts must not name a
+    # collection (the judge states the information gap; routing belongs to the
+    # Planner). Violations re-prompt through the uniform generate_structured path.
+    schema = make_sufficient_context_schema([c["collection"] for c in described])
     result = await generate_structured(schema, prompt)
 
-    judge_info = f"reason: {result.reason}"
+    judge_info = f"verdict: {result.verdict}\nreason: {result.reason}"
     if result.feedback and result.feedback.strip():
         judge_info += f"\nfeedback: {result.feedback}"
 
     trace_entry = make_trace_entry(
         agent="sufficient_context",
-        decision=f"sufficient={result.sufficient}",
+        decision=f"verdict={result.verdict}",
         detail=(
             f"reason={result.reason[:100]}, "
             f"feedback={result.feedback[:100]}, "
@@ -168,8 +177,15 @@ async def sufficient_context_node(
         info=judge_info,
     )
 
-    # ── Outcome 1: context is sufficient → normal answer ──
-    if result.sufficient:
+    # The verdict is a closed set of retrieval situations (SGR Routing); each
+    # maps to exactly one outcome. SYNTHESIS_VERDICTS → answer (found, or the
+    # honest "only …" over an exhausted corpus); CONTINUE_VERDICTS → re-route
+    # while a route remains; "ничего_не_найдено" → refuse (nothing found AND
+    # nowhere left, so don't burn the remaining iterations on exhaustion).
+    verdict = result.verdict
+
+    # ── Outcome 1: the corpus has its answer → synthesis ──
+    if verdict in SYNTHESIS_VERDICTS:
         return Command(
             goto="synthesis",
             update={
@@ -180,12 +196,12 @@ async def sufficient_context_node(
             },
         )
 
-    # ── Outcome 2: insufficient, but iterations left → re-route & search more ──
+    # ── Outcome 2: a route remains and iterations are left → re-route ──
     # Go back to the Planner (not query_rewriter): it re-routes to the
     # collection most likely to hold the missing piece, instead of blindly
     # searching every collection. Mirrors Google's loop that re-enters before
     # Search Plan.
-    if iteration < max_iter:
+    if verdict in CONTINUE_VERDICTS and iteration < max_iter:
         return Command(
             goto="planner",
             update={
@@ -199,7 +215,8 @@ async def sufficient_context_node(
             },
         )
 
-    # ── Outcome 3: insufficient + no iterations left → give up ──
+    # ── Outcome 3: nothing found, or routes remained but iterations are spent
+    #    → honest refusal ──
     return Command(
         goto="give_up",
         update={

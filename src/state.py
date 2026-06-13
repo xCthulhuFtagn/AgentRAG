@@ -5,8 +5,7 @@ TypedDict with Annotated reducers for accumulation across iterations.
 
 import json
 import operator
-import re
-from typing import Annotated, Any, Optional, Sequence, TypedDict
+from typing import Annotated, Any, Literal, Optional, Sequence, TypedDict
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -73,20 +72,64 @@ class PlanResult(BaseModel):
     _coerce_steps = field_validator("steps", mode="before")(_coerce_list)
 
 
+# ── Judge verdict: a closed set of retrieval situations (SGR Routing) ─────────
+#
+# Replaces the old `sufficient: bool`. A weak model rationalizes a free boolean
+# it has to justify — it kept reading "is this thin answer good enough? (no)" as
+# insufficient even when the corpus was exhausted (the «пушкин» trace: +0 new
+# chunks, only one plausible collection, yet four iterations of inventing
+# "missing biography/works"). Classifying into NAMED situations is what weak
+# models do reliably, and each value's wording carries its own criterion, so the
+# decision is "which retrieval state am I in?" — not a quality grade. The bool
+# also muddled two orthogonal axes; the situations split them:
+#   • route availability  → есть_необысканная_коллекция / есть_неиспробованный_угол
+#   • what was found       → ответ_найден / исчерпано_есть_упоминания / ничего_не_найдено
+# Each value maps to exactly one graph outcome (sufficient_context_node).
+JudgeVerdict = Literal[
+    "ответ_найден",
+    "исчерпано_есть_упоминания",
+    "есть_необысканная_коллекция",
+    "есть_неиспробованный_угол",
+    "ничего_не_найдено",
+]
+# Verdicts that route to Synthesis — the corpus has given its answer (the full
+# answer, or the honest "the sources contain only …" over thin-but-real findings).
+SYNTHESIS_VERDICTS: frozenset[str] = frozenset(
+    {"ответ_найден", "исчерпано_есть_упоминания"}
+)
+# Verdicts that route back to the Planner — a concrete route remains. feedback
+# is required for these (the Planner's iteration mode reads it).
+CONTINUE_VERDICTS: frozenset[str] = frozenset(
+    {"есть_необысканная_коллекция", "есть_неиспробованный_угол"}
+)
+# "ничего_не_найдено" is neither: nothing found AND nowhere left → give_up
+# directly (no point burning the remaining iterations re-searching exhaustion).
+
+
 class SufficientContextResult(BaseModel):
     """Sufficient Context Agent output.
 
     Schema-Guided Reasoning: fields follow the order a person would reason in,
     because structured output is generated field-by-field in declaration order.
-    First `question_verbatim` — a literal COPY of the user's question (copying is
-    reliable even for weak models, unlike generating sub-questions), re-anchoring
-    the judge on the question as asked after ~tens of kB of chunks inflated its
-    idea of what was asked. Then the analysis (reason), the attempted answer
-    (draft_answer), the gaps (missing_parts); then the `sufficient` verdict —
-    grounded in all of the above instead of committed up front and rationalized
-    afterward (which let "not found" drafts pass as True). `feedback` comes LAST
-    of all: describing the information gap is a consequence of having concluded
-    insufficiency, so it is written after the verdict, not before it.
+    First the analysis (`reason`) — what the chunks say about the question AS
+    ASKED, without inflating an underspecified query into sub-questions; then the
+    attempted answer (`draft_answer`), the gaps (`missing_parts`), and
+    `retrieval_state` — a cascade step forcing the model to read the
+    route-availability signals (unsearched collection? a collection still
+    yielding NEW on-topic chunks, or +0?) BEFORE it commits. Only then the
+    `verdict` — a closed Literal of named retrieval situations (NOT a quality
+    grade), grounded in everything above instead of committed up front and
+    rationalized afterward (which let "not found" drafts pass as sufficient).
+    `feedback` comes LAST: describing the information gap is a consequence of
+    having concluded a CONTINUE verdict, written after it.
+
+    A `question_verbatim` field used to lead, re-anchoring the judge on the
+    question via a literal copy. It was dropped: GigaChat reliably copies short
+    queries but rewords longer Russian sentences, and the verbatim-copy validator
+    then rejected an otherwise-correct verdict, forcing a spurious give_up. The
+    anti-inflation job it did is now carried by `reason`'s wording plus the
+    verdict's situation framing (an underspecified query maps cleanly to
+    `исчерпано_есть_упоминания`, so there is nothing to gain by inflating it).
 
     Separation of concerns: the judge speaks the language of INFORMATION (what
     was asked, what was found, which fact is missing). Routing — which collection
@@ -94,17 +137,14 @@ class SufficientContextResult(BaseModel):
     `feedback`/`missing_parts` (enforced by make_sufficient_context_schema, which
     knows the inventory).
 
-    Verdict semantics: `sufficient` asks "would one more search of THIS corpus
-    materially improve the answer?" — a retrieval-state call, not a grade
-    against an ideal answer. An exhausted corpus whose findings are thin (only
-    passing mentions) is sufficient: the honest answer is "the sources contain
-    only …". Zero findings are never sufficient — that path stays a refusal.
+    Verdict semantics: the question is "what retrieval situation are we in?" — a
+    state call, not a grade against an ideal answer. An exhausted corpus whose
+    findings are thin (only passing mentions) is `исчерпано_есть_упоминания` and
+    routes to Synthesis: the honest answer is "the sources contain only …". Zero
+    findings are never synthesised — `ничего_не_найдено` stays an honest refusal.
     """
-    question_verbatim: str = Field(
-        description="САМОЕ ПЕРВОЕ: скопируй вопрос пользователя ДОСЛОВНО, символ в символ — ничего не добавляя, не сокращая и не перефразируя."
-    )
     reason: str = Field(
-        description="Анализ из двух частей: (1) что по вопросу из question_verbatim найденные фрагменты содержат, а чего в них нет — относительно вопроса, КАК ОН ЗАДАН, без добавления подвопросов, которых пользователь не задавал; (2) по статистике поисков — исчерпана ли база по теме вопроса, или есть конкретная причина ожидать от неё большего (необысканная коллекция, неиспробованные формулировки)."
+        description="САМОЕ ПЕРВОЕ. Анализ из двух частей: (1) что по вопросу пользователя (КАК ОН ЗАДАН, без добавления подвопросов, которых пользователь не задавал) найденные фрагменты содержат, а чего в них нет; (2) по статистике поисков — исчерпана ли база по теме вопроса, или есть конкретная причина ожидать от неё большего (необысканная коллекция, неиспробованные формулировки)."
     )
     # The conditionally-empty fields below (draft_answer, missing_parts,
     # feedback) are REQUIRED on purpose — no defaults. A weak GigaChat omits
@@ -115,76 +155,83 @@ class SufficientContextResult(BaseModel):
     # `required` list, so "required flat type + empty value" ("" / []) is the
     # only shape whose requiredness actually reaches the model.
     draft_answer: str = Field(
-        description="Лучший ответ на вопрос из question_verbatim, построенный ТОЛЬКО из найденного контекста. Если по теме есть лишь отдельные упоминания — приведи их («в источниках об этом только …»): для исчерпанной базы это и есть ответ. Если не найдено вообще ничего — прямо так и напиши; не заполняй поле из общих знаний.",
+        description="Лучший ответ на вопрос пользователя, построенный ТОЛЬКО из найденного контекста. Если по теме есть лишь отдельные упоминания — приведи их («в источниках об этом только …»): для исчерпанной базы это и есть ответ. Если не найдено вообще ничего — прямо так и напиши; не заполняй поле из общих знаний.",
     )
     missing_parts: list[str] = Field(
         description="Конкретные недостающие ФАКТЫ — каждый элемент короткая именная группа (например «расшифровка аббревиатуры ЭВМ»). НЕ маршруты и НЕ имена коллекций («поиск в коллекции …» — неправильно), НЕ размытое («более подробная информация»). Пустой список ([]), если черновик уже отвечает на вопрос.",
     )
 
     _coerce_missing = field_validator("missing_parts", mode="before")(_coerce_list)
-    sufficient: bool = Field(
-        description="ВЕРДИКТ, выносится ПОСЛЕ полей выше; вопрос вердикта — даст ли ещё один поиск по базе что-то, заметно улучшающее ответ. True в двух случаях: (1) draft_answer отвечает на вопрос из question_verbatim, КАК ОН ЗАДАН, — даже если можно было бы найти «больше деталей»; (2) база ИСЧЕРПАНА по теме (все правдоподобно-релевантные коллекции обысканы, новые поиски не приносят нового по теме) и draft_answer собирает всё найденное, пусть и скудное. False — ТОЛЬКО при конкретной причине ожидать от базы большего: необысканная правдоподобная коллекция или неиспробованные формулировки в коллекции, ещё дающей новое. И всегда False, если по теме не найдено ВООБЩЕ ничего: пустота — не ответ."
+    retrieval_state: str = Field(
+        description="ПЕРЕД вердиктом проговори СОСТОЯНИЕ ПОИСКА по статистике (это факты, а не оценка качества ответа): (а) есть ли в описи правдоподобно-релевантная коллекция, которой НЕТ в статистике поисков (ещё не обыскана); (б) даёт ли хоть одна уже обысканная коллекция НОВЫЕ по теме чанки — или последний поиск везде дал «+0 новых»/чанки не по теме. Опирайся на цифры статистики, не на свою память.",
+    )
+    verdict: JudgeVerdict = Field(
+        description=(
+            "ВЕРДИКТ — выбери РОВНО ОДНУ ситуацию, ПОСЛЕ полей выше (по retrieval_state и draft_answer). "
+            "Это состояние ПОИСКА, а не оценка качества ответа:\n"
+            "• «ответ_найден» — draft_answer отвечает на вопрос, как он задан (даже если можно накопать ещё деталей);\n"
+            "• «исчерпано_есть_упоминания» — все правдоподобно-релевантные коллекции обысканы, новые поиски не приносят нового ПО ТЕМЕ (последний поиск «+0 новых» или чанки не о том), а draft_answer собрал всё найденное, пусть и скудное («в источниках об этом есть только …») — это полноценный честный ответ;\n"
+            "• «есть_необысканная_коллекция» — в описи есть правдоподобно-релевантная коллекция, которой НЕТ в статистике поисков;\n"
+            "• «есть_неиспробованный_угол» — релевантная коллекция ещё отдаёт НОВЫЕ по теме чанки (её последний поиск НЕ «+0») и есть конкретная неиспробованная формулировка; при «+0 новых» эту ситуацию для такой коллекции выбирать НЕЛЬЗЯ;\n"
+            "• «ничего_не_найдено» — по теме нет НИ ОДНОГО упоминания, и искать больше негде (все правдоподобные коллекции обысканы)."
+        )
     )
     feedback: str = Field(
-        description="В САМОМ КОНЦЕ. При sufficient=true передай пустую строку. При sufficient=false опиши ИНФОРМАЦИОННЫЙ пробел; удобная форма: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» НЕ называй коллекции и не указывай, где искать — выбор источника не твоя задача.",
+        description="В САМОМ КОНЦЕ. Непустой ТОЛЬКО при «есть_необысканная_коллекция» или «есть_неиспробованный_угол» — опиши ИНФОРМАЦИОННЫЙ пробел; удобная форма: «Не хватает: …. Найдено вместо этого: …. Альтернативные формулировки: ….» НЕ называй коллекции и не указывай, где искать — выбор источника не твоя задача. Для остальных вердиктов передай пустую строку.",
     )
 
+    @property
+    def sufficient(self) -> bool:
+        """True iff the verdict routes to Synthesis (corpus has its answer).
+
+        A compatibility shim so node/trace code and tests can keep asking the
+        binary question; the model now emits the richer `verdict` instead.
+        """
+        return self.verdict in SYNTHESIS_VERDICTS
+
     @model_validator(mode="after")
-    def _insufficient_verdict_is_actionable(self):
+    def _verdict_is_actionable(self):
         # Validate only what CODE consumes; what an LLM consumes is guided by
-        # the prompt, not policed. feedback's only consumer is the Planner
-        # reading prose — but its PRESENCE is a code contract: the Planner's
-        # iteration mode keys off bool(feedback), so an empty one at False
-        # would silently demote it to initial-plan mode. The template in the
-        # field description is guidance, deliberately NOT enforced: a label
+        # the prompt, not policed. A blank missing_parts item is never useful
+        # (the give_up renderer and the Planner both read them), so reject it
+        # on any verdict. feedback's PRESENCE is a code contract: the Planner's
+        # iteration mode keys off bool(feedback), and only CONTINUE_VERDICTS
+        # route to the Planner — so feedback is required exactly for those, and
+        # an empty one would silently demote the re-route to initial-plan mode.
+        # The feedback TEMPLATE is guidance, deliberately NOT enforced: a label
         # check rejects semantically-good feedback worded differently, and a
         # re-prompt burned on formatting can escalate a correct verdict into
-        # give_up. Checks needing node-time context (collection names, the
-        # literal query) live in make_sufficient_context_schema.
-        if self.sufficient:
-            return self
-        if not self.feedback.strip():
-            raise ValueError(
-                "Когда sufficient=false, ОБЯЗАТЕЛЬНО заполни feedback — опиши "
-                "информационный пробел: какая информация отсутствует, что "
-                "поиски дали вместо неё, какими ещё формулировками она может "
-                "называться. Иначе поставь sufficient=true, если найденный "
-                "контекст действительно отвечает на вопрос."
-            )
+        # give_up. The check needing node-time context (collection names)
+        # lives in make_sufficient_context_schema.
         if any(not part or not part.strip() for part in self.missing_parts):
             raise ValueError(
                 "каждый элемент missing_parts должен быть непустой строкой — "
                 "короткой именной группой, называющей конкретный отсутствующий факт."
             )
+        if self.verdict in CONTINUE_VERDICTS and not self.feedback.strip():
+            raise ValueError(
+                "Когда вердикт — «есть_необысканная_коллекция» или "
+                "«есть_неиспробованный_угол», ОБЯЗАТЕЛЬНО заполни feedback — "
+                "опиши информационный пробел: какая информация отсутствует, что "
+                "поиски дали вместо неё, какими ещё формулировками она может "
+                "называться. Если же продолжать поиск незачем — выбери вердикт, "
+                "отвечающий найденному («ответ_найден», "
+                "«исчерпано_есть_упоминания» или «ничего_не_найдено»)."
+            )
         return self
 
 
-def _normalize_question(s: str) -> str:
-    """Normalize a question for the verbatim-copy comparison.
-
-    Tolerates the trivial drift a weak model introduces when copying (case,
-    ё/е, whitespace runs, wrapping quotes, trailing punctuation) while still
-    rejecting paraphrase — the failure the check exists to catch.
-    """
-    s = (s or "").casefold().replace("ё", "е")
-    s = re.sub(r"\s+", " ", s).strip()
-    s = s.strip("«»\"'“”‘’ ").rstrip("?.!…")
-    return s.strip()
-
-
 def make_sufficient_context_schema(
-    collection_names: Sequence[str], query: str
+    collection_names: Sequence[str],
 ) -> type[SufficientContextResult]:
-    """SufficientContextResult bound to node-time context (inventory + query).
+    """SufficientContextResult bound to node-time context (the inventory).
 
-    Two constraints can only be checked with information the node has — the
-    actual collection names and the literal user question — so they are baked
-    into a dynamic subclass as validators. That keeps every requirement a
-    Pydantic constraint flowing through the one uniform generate_structured
-    re-prompt path: no separate node-level retry loop.
+    One constraint can only be checked with information the node has — the actual
+    collection names — so it is baked into a dynamic subclass as a validator.
+    That keeps every requirement a Pydantic constraint flowing through the one
+    uniform generate_structured re-prompt path: no separate node-level retry loop.
 
-    - question_verbatim must be a (normalized-)literal copy of the user's query;
-    - feedback/missing_parts of an insufficient verdict must not name a
+    - feedback/missing_parts of a non-synthesis verdict must not name a
       collection or prescribe where to search — the judge states the information
       gap, the Planner owns routing. Weak models violate this regularly, hence a
       mechanical check rather than a prompt-only rule.
@@ -194,22 +241,15 @@ def make_sufficient_context_schema(
     banned = sorted(
         {n.strip().casefold() for n in collection_names if n and len(n.strip()) >= 3}
     )
-    expected_question = _normalize_question(query)
 
     class BoundSufficientContextResult(SufficientContextResult):
         @model_validator(mode="after")
-        def _question_copied_verbatim(self):
-            if _normalize_question(self.question_verbatim) != expected_question:
-                raise ValueError(
-                    "question_verbatim должен быть ДОСЛОВНОЙ копией вопроса "
-                    f"пользователя: «{query}» — скопируй его без изменений, "
-                    "ничего не добавляя и не перефразируя."
-                )
-            return self
-
-        @model_validator(mode="after")
         def _no_routes_in_information_fields(self):
-            if self.sufficient:
+            # The ban applies wherever feedback/missing_parts are consumed
+            # downstream — the Planner (CONTINUE verdicts) and the give_up
+            # renderer (ничего_не_найдено, which shows missing_parts). On the
+            # Synthesis verdicts these fields are unused, so skip the check.
+            if self.verdict in SYNTHESIS_VERDICTS:
                 return self
             fields = [("feedback", self.feedback)]
             fields += [("missing_parts", part) for part in self.missing_parts]
