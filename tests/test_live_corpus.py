@@ -11,22 +11,25 @@ Every case prints a compact trace (per-node decision + verdict chain + token Σ 
 the answer) via `_run`, so `-s` shows exactly what the graph did.
 
 ── Corpus reality (sampled from the indexed chunks, not the descriptions) ──
-OCR quality differs sharply per document, which dictates which outcome each
-collection can produce:
-  • 08_Geografiya_Baranskiy_1933 (611 chunks) — CLEAN Cyrillic. Verifiable
-    facts: Карагандинский угольный бассейн, цветная металлургия (медь/цинк/
-    свинец), сахарная свёкла (СССР 1-е место, Украина), Березниковский
-    химкомбинат, реки Сибири/Амур, структура народного хозяйства. → ANSWER_FOUND.
-  • 10-astronomiya_vorontcov-velyaminov_1966 (207) — partly readable; the
-    opening ("астрономия — наука о небесных телах") is clean. → ANSWER_FOUND
-    for the subject, degraded deeper in.
-  • 07_Rodnaya_literatura_Snezhnevskaya_1991 (698) — OCR garble (Cyrillic read
-    as Latin); only a passing Пушкин mention. → EXHAUSTED-THIN / graceful noise.
-  • 09-10-obschaya-biologiya_polyanskiy_1987 (469) — OCR garble. → graceful noise.
+After re-indexing through the GPU EasyOCR sidecar (OCR_SERVER_URL), all four
+collections carry CLEAN, readable Cyrillic (an earlier Tesseract pass had left
+three of them as Latin-transliterated garble). Verifiable content per document:
+  • 08_Geografiya_Baranskiy_1933 — география СССР 1933: Карагандинский угольный
+    бассейн, цветная металлургия (медь/сера/серная кислота), нефтепроводы
+    Баку—Батум, сахарная свёкла, структура народного хозяйства, транспорт.
+  • 10-astronomiya_vorontcov-velyaminov_1966 — предмет астрономии, законы
+    Кеплера и орбиты (перигелий/афелий), Солнце/равноденствия, планеты
+    Солнечной системы, кометы, переменные звёзды (Альголь).
+  • 07_Rodnaya_literatura_Snezhnevskaya_1991 — Тарас Бульба (Гоголь), Пушкин
+    (Узник, Полтавский бой, Обвал, Туча), Лермонтов (Тучи, Кинжал, Горные…).
+  • 09-10-obschaya-biologiya_polyanskiy_1987 — происхождение человека,
+    фотосинтез, генетика/наследственная изменчивость, геологические эры.
 
-So the four case groups below are: clean facts → synthesis; an underspecified
-thin topic → exhausted-but-synthesised; absent topics → honest refusal; and
-OCR-degraded collections → clean termination either way (never a crash).
+So the three case groups below are: concrete facts the corpus covers → synthesis
+(grounded); an underspecified query → synthesis (answer or honest "только …");
+absent topics → honest refusal. Residual character-level OCR noise remains, but
+the synthesised answer (clean Russian generated from the chunks) is asserted, so
+content checks use stems robust to it.
 
 Doubly gated (skips unless both hold): GIGACHAT_CREDENTIALS present (read via
 general_settings → .env) AND the textbook corpus discoverable under data/lancedb/.
@@ -198,6 +201,26 @@ ANSWER_FOUND_CASES = [
         ("небесн", "тел", "астроном", "строени"),
         id="astro-subject",
     ),
+    pytest.param(
+        "Что сказано про кометы?",
+        ("комет", "хвост", "метеор", "солнц"),
+        id="astro-comets",
+    ),
+    pytest.param(
+        "О чём повесть «Тарас Бульба»?",
+        ("бульб", "тарас", "козак", "гогол"),
+        id="lit-taras-bulba",
+    ),
+    pytest.param(
+        "Какие стихотворения Лермонтова есть в учебнике?",
+        ("лермонтов", "туч", "кинжал", "парус", "стих"),
+        id="lit-lermontov",
+    ),
+    pytest.param(
+        "Что такое фотосинтез?",
+        ("фотосинтез", "солнеч", "кислород", "синтез", "углевод"),
+        id="bio-photosynthesis",
+    ),
 ]
 
 
@@ -219,20 +242,21 @@ async def test_answer_found(corpus_db_path, query, stems):
     )
 
 
-# ── 2. UNDERSPECIFIED THIN topic — exhausted but present → SYNTHESIS ─────────
-# The corpus has only passing mentions, so it is exhausted (not empty): the
-# judge must rule a synthesis verdict and answer honestly, NOT loop to give_up.
-# This is the regression the Literal-verdict redesign fixed.
+# ── 2. UNDERSPECIFIED one-word query → SYNTHESIS (answer or honest "только …") ─
+# A bare topic word must resolve to a synthesis verdict (ответ_найден once the
+# corpus carries real content, or исчерпано_есть_упоминания when thin) and be
+# answered — NOT inflated into a questionnaire and looped to give_up. This is
+# the regression the Literal-verdict redesign fixed (the «пушкин» trace).
 EXHAUSTED_THIN_CASES = [
-    pytest.param("пушкин", ("пушкин",), id="thin-pushkin"),
+    pytest.param("пушкин", ("пушкин",), id="underspecified-pushkin"),
 ]
 
 
 @requires_live_corpus
 @pytest.mark.parametrize("query, stems", EXHAUSTED_THIN_CASES)
-async def test_underspecified_thin_synthesizes(corpus_db_path, query, stems):
-    """An underspecified query over a thin topic synthesises the honest
-    "только упоминания" answer rather than refusing."""
+async def test_underspecified_query_synthesizes(corpus_db_path, query, stems):
+    """A bare topic word resolves to a synthesis verdict and is answered on
+    topic, rather than refused."""
     state = await _run(query, corpus_db_path)
     _skip_on_llm_failure(state)
 
@@ -268,34 +292,6 @@ async def test_absent_topic_is_refused(corpus_db_path, query):
         f"verdicts={_judge_verdicts(state)}"
     )
     assert state.get("final_answer", "").strip(), "give_up produced no refusal text"
-
-
-# ── 4. OCR-DEGRADED collections — must terminate cleanly either way ──────────
-# Literature/biology indexed from scanned PDFs is OCR garble, so retrieval
-# returns noise. The system must still TERMINATE honestly — synthesise the thin
-# real signal or refuse — and never crash or hang. We assert clean termination,
-# not a specific outcome (asserting a verdict over OCR noise would be flaky).
-DEGRADED_CASES = [
-    pytest.param("Тарас Бульба", id="degraded-taras-bulba"),
-    pytest.param("стихи Лермонтова", id="degraded-lermontov"),
-    pytest.param("что такое фотосинтез", id="degraded-photosynthesis"),
-    pytest.param("кометы и их хвосты", id="degraded-comets"),
-]
-
-
-@requires_live_corpus
-@pytest.mark.parametrize("query", DEGRADED_CASES)
-async def test_degraded_collection_terminates_cleanly(corpus_db_path, query):
-    """Over OCR-noisy collections the run must reach a terminal node with a
-    non-empty answer (synthesis OR give_up) — graceful, never a crash."""
-    state = await _run(query, corpus_db_path)
-    _skip_on_llm_failure(state)
-
-    terminal = _reached_synthesis(state) ^ _reached_give_up(state)
-    assert terminal, (
-        f"expected exactly one terminal node; agents={_trace_agents(state)}"
-    )
-    assert state.get("final_answer", "").strip(), "no final answer produced"
 
 
 if __name__ == "__main__":
