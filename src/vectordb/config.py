@@ -92,6 +92,10 @@ class VectorDBSettings(BaseSettings):
     # happens — the judge sees only the raw +N novelty delta.  Search-time
     # (no reindex on change), threaded via stitch_settings.
     reranking_enabled: bool = True
+    # When both reranking_enabled and this are True, chunks the LLM marks as
+    # irrelevant are dropped from search results before the judge sees them.
+    # Default False — assess but don't remove.
+    reranking_remove_irrelevant: bool = False
 
     # ── Neighbor stitching (deterministic context expansion) ─────────────────
     # Each hit's seq → window [seq-expand_padding, seq+expand_padding]; two

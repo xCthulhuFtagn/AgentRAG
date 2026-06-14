@@ -113,11 +113,26 @@ async def search_fanout_node(
             for ri, r in enumerate(results):
                 r.setdefault("relevant", [])
             for (ri, ci), rel in zip(chunk_map, relevance):
-                # Extend list to be at least ci+1 long (should already be aligned).
                 rl = results[ri]["relevant"]
                 while len(rl) <= ci:
                     rl.append(False)
                 rl[ci] = rel
+
+        # ── Remove irrelevant chunks (opt-in) ────────────────────────────
+        if stitch.get("reranking_remove_irrelevant", False):
+            for r in results:
+                rel = r.get("relevant")
+                if not rel:
+                    continue
+                keep = [i for i, ok in enumerate(rel) if ok]
+                if len(keep) == len(rel):
+                    continue  # all relevant, nothing to drop
+                r["chunks"] = [r["chunks"][i] for i in keep]
+                if r.get("seqs"):
+                    r["seqs"] = [r["seqs"][i] for i in keep if i < len(r["seqs"])]
+                if r.get("scores"):
+                    r["scores"] = [r["scores"][i] for i in keep if i < len(r["scores"])]
+                r["relevant"] = [rel[i] for i in keep]
 
     # Keep EVERY executed search, including empty ones: search_results is the
     # record the mechanical statistics are computed from (searched set, «+0

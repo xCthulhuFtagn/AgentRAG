@@ -185,6 +185,7 @@ def resolve_index_settings(overrides: dict | None = None) -> dict:
         "expand_padding": vdb_settings.expand_padding,
         "bridge_gap": vdb_settings.bridge_gap,
         "reranking_enabled": vdb_settings.reranking_enabled,
+        "reranking_remove_irrelevant": vdb_settings.reranking_remove_irrelevant,
     }
     for key, value in (overrides or {}).items():
         if key in resolved and value is not None:
