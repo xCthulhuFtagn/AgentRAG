@@ -1,5 +1,6 @@
 """Common utilities shared across all agents."""
 
+import asyncio
 import functools
 import logging
 from contextvars import ContextVar
@@ -7,6 +8,7 @@ from functools import lru_cache
 
 from langchain_core.callbacks import AsyncCallbackHandler
 from langchain_gigachat.chat_models import GigaChat
+from pydantic import BaseModel, Field
 from langgraph.types import Command
 
 from src.config import general_settings
@@ -134,45 +136,81 @@ async def get_inventory_str(db_path: str | None, *, backtick_names: bool = False
 # signal, never a verdict criterion — a low percentage must not read as
 # "insufficient", vector search retrieves what's relevant, not everything).
 
-def _topic_hits_in_chunks(
-    chunks: list[str],
-    seqs: list[int | None],
-    new_seq_set: set[int],
-    user_query: str,
-) -> int | None:
-    """How many NEW chunks mention the original user query.
+def _topic_hits_from_relevant(new_seq_set, seqs, chunks, relevant_flags):
+    """Count how many NEW chunks the LLM marked as relevant to the query.
 
-    Walks aligned chunks/seqs; for each chunk whose seq is in *new_seq_set*,
-    checks whether any content word (≥4 chars) from *user_query* appears as a
-    substring.  Words ≥6 chars also contribute a stem prefix (``word[:-2]``) so
-    Russian morphological variants are caught (e.g. «одноклеточные» stem
-    «одноклеточн» matches «одноклеточных»).
-
-    Returns the hit count, or ``None`` when *user_query* has no content words
-    (too short / all stopwords) — the signal is then unavailable, and the
-    display falls back to the raw ``+N`` novelty delta.
+    *relevant_flags* is a list of bools aligned with *chunks*/*seqs* by index,
+    produced by `assess_chunks_relevance`.  A chunk counts as a topic hit when
+    its seq is in *new_seq_set* AND its corresponding flag is ``True``.
+    Returns ``None`` when *relevant_flags* is absent (reranking was disabled
+    for that search) — the trend display then falls back to the raw ``+N``.
     """
-    if not user_query or not chunks:
+    if not relevant_flags:
         return None
-    query_words = [w.lower() for w in user_query.split() if len(w) >= 4]
-    if not query_words:
-        return None
-    terms: set[str] = set()
-    for w in query_words:
-        terms.add(w)
-        if len(w) >= 6:
-            terms.add(w[:-2])  # stem prefix for morphological variants
     hits = 0
     for i, s in enumerate(seqs):
-        if s is not None and s in new_seq_set and i < len(chunks):
-            chunk_lower = chunks[i].lower()
-            if any(term in chunk_lower for term in terms):
+        if s is not None and s in new_seq_set and i < len(relevant_flags):
+            if relevant_flags[i]:
                 hits += 1
     return hits
 
 
+# ── LLM per-chunk relevance assessment ─────────────────────────────────────
+# When reranking is enabled (project setting), search_fanout calls the LLM for
+# every retrieved chunk to judge relevance to the original query.  The results
+# ride in search_results as a "relevant" list (bools, aligned with chunks).
+# The prompt is deliberately minimal — a one-sentence yes/no with a low
+# temperature for speed and consistency.
+
+class ChunkRelevanceResult(BaseModel):
+    """Оценка релевантности фрагмента вопросу — содержит ли полезную информацию."""
+    relevant: bool = Field(
+        description=(
+            "True если фрагмент содержит информацию, полезную для ответа "
+            "на вопрос (пусть даже косвенно или частично). "
+            "False если фрагмент на другую тему или не помогает ответить."
+        )
+    )
+
+
+_CHUNK_RELEVANCE_PROMPT = """Оцени, содержит ли фрагмент информацию, полезную для ответа на вопрос.
+Отвечай «да» (relevant=true), только если фрагмент действительно по теме вопроса.
+
+Вопрос: {query}
+
+Фрагмент:
+{chunk}"""
+
+
+async def _assess_one(chunk: str, query: str, llm) -> bool:
+    """Assess a single chunk → bool.  Failure → False (conservative)."""
+    try:
+        prompt = _CHUNK_RELEVANCE_PROMPT.format(query=query, chunk=chunk)
+        result = await ainvoke_with_retry(llm, prompt)
+        return bool(result.relevant) if result else False
+    except Exception:
+        return False
+
+
+async def assess_chunks_relevance(
+    chunks: list[str], query: str
+) -> list[bool]:
+    """Assess each chunk's relevance to *query* via parallel LLM calls.
+
+    One structured-LLM instance is shared across chunks (cached by schema type).
+    Each call uses `ainvoke_with_retry` (tenacity) — transient transport errors
+    retry; on any final failure the chunk is conservatively marked not relevant.
+    All chunks are assessed concurrently via `asyncio.gather`.
+    """
+    if not chunks:
+        return []
+    llm = get_structured_llm(ChunkRelevanceResult, temperature=0.0)
+    tasks = [_assess_one(c, query, llm) for c in chunks]
+    return list(await asyncio.gather(*tasks))
+
+
 def collection_search_stats(
-    search_results: list[dict], *, user_query: str | None = None
+    search_results: list[dict],
 ) -> dict[str, dict]:
     """Per-collection statistics over every search actually executed.
 
@@ -188,8 +226,10 @@ def collection_search_stats(
     collection, `seqs_known=False` marks legacy tables without a seq
     column (novelty can't be deduplicated → last_new=None, coverage omitted),
     and `new_topic_hits`/`new_counts` are parallel per-search lists tracking
-    how many NEW chunks per search mention *user_query* — a declining trend
-    signals off-topic exhaustion even when the raw ``+N`` stays positive.
+    how many NEW chunks per search were LLM-assessed as relevant — a declining
+    trend signals off-topic exhaustion even when the raw ``+N`` stays positive.
+    When a search result has no ``relevant`` field (reranking disabled), the
+    lists stay empty and the display falls back to raw ``+N``.
     """
     stats: dict[str, dict] = {}
     for r in search_results:
@@ -223,15 +263,17 @@ def collection_search_stats(
         st["retrieved"] |= new
 
         # Per-search topic-hit trend: of the chunks NEW in this search, how
-        # many mention the original user query?  A falling trend means the
+        # many did the LLM assess as relevant?  A falling trend means the
         # collection is scraping increasingly off-topic parts of the document
-        # — exhaustion the raw +N cannot see.
-        if user_query:
-            seq_list = [s for s in (r.get("seqs") or []) if s is not None]
-            th = _topic_hits_in_chunks(chunks, seq_list, new, user_query)
-            if th is not None:
-                st["new_topic_hits"].append(th)
-                st["new_counts"].append(len(new))
+        # — exhaustion the raw +N cannot see.  No "relevant" field → reranking
+        # was disabled → skip (the display falls back to raw +N).
+        seq_list = [s for s in (r.get("seqs") or []) if s is not None]
+        th = _topic_hits_from_relevant(
+            new, seq_list, chunks, r.get("relevant")
+        )
+        if th is not None:
+            st["new_topic_hits"].append(th)
+            st["new_counts"].append(len(new))
     return stats
 
 

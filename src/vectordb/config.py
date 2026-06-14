@@ -84,6 +84,15 @@ class VectorDBSettings(BaseSettings):
     # Nearest chunks per (collection, query) before stitching.
     search_top_k: int = Field(default=5, ge=1)
 
+    # ── Reranking (LLM per-chunk relevance assessment) ──────────────────────
+    # When True, search_fanout calls the LLM for every retrieved chunk to
+    # assess relevance to the original query.  The per-search topic-hit trend
+    # («прирост по теме») shown to the judge is then powered by these LLM
+    # scores instead of keyword matching.  When False, no relevance assessment
+    # happens — the judge sees only the raw +N novelty delta.  Search-time
+    # (no reindex on change), threaded via stitch_settings.
+    reranking_enabled: bool = True
+
     # ── Neighbor stitching (deterministic context expansion) ─────────────────
     # Each hit's seq → window [seq-expand_padding, seq+expand_padding]; two
     # windows merge when the uncovered gap between them is <= bridge_gap, then

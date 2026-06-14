@@ -87,6 +87,38 @@ async def search_fanout_node(
             }
 
     results = await asyncio.gather(*[search_one(c, q) for c, q in resolved])
+
+    # ── LLM per-chunk relevance assessment (opt-in) ───────────────────────
+    # When the project has reranking enabled, every retrieved chunk gets an
+    # independent LLM call judging relevance to the original query.  Results
+    # are stored as a "relevant" list (bools, aligned with chunks) in each
+    # search result dict — consumed by collection_search_stats for the
+    # per-search topic-hit trend.
+    stitch = state.get("stitch_settings") or {}
+    if stitch.get("reranking_enabled", True):
+        from src.agents.common import assess_chunks_relevance
+
+        query = state["query"]
+        # Collect all chunks (flatten), track which result they belong to.
+        all_chunks: list[str] = []
+        chunk_map: list[tuple[int, int]] = []  # (result_idx, chunk_idx)
+        for ri, r in enumerate(results):
+            for ci in range(len(r.get("chunks", []))):
+                all_chunks.append(r["chunks"][ci])
+                chunk_map.append((ri, ci))
+
+        if all_chunks:
+            relevance = await assess_chunks_relevance(all_chunks, query)
+            # Reassemble: build a "relevant" list per result, aligned with chunks.
+            for ri, r in enumerate(results):
+                r.setdefault("relevant", [])
+            for (ri, ci), rel in zip(chunk_map, relevance):
+                # Extend list to be at least ci+1 long (should already be aligned).
+                rl = results[ri]["relevant"]
+                while len(rl) <= ci:
+                    rl.append(False)
+                rl[ci] = rel
+
     # Keep EVERY executed search, including empty ones: search_results is the
     # record the mechanical statistics are computed from (searched set, «+0
     # новых чанков» exhaustion detector, coverage). Consumers that render
