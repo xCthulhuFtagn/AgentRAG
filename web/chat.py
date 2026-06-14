@@ -30,6 +30,7 @@ async def run_chat(project_id: str, query: str) -> AsyncIterator[tuple[str, obje
         stitch_settings={
             "expand_padding": settings["expand_padding"],
             "bridge_gap": settings["bridge_gap"],
+            "reranking_enabled": settings["reranking_enabled"],
         },
     )
 
