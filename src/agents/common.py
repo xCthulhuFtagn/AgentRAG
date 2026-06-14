@@ -129,19 +129,62 @@ async def get_inventory_str(db_path: str | None, *, backtick_names: bool = False
 # signal, never a verdict criterion — a low percentage must not read as
 # "insufficient", vector search retrieves what's relevant, not everything).
 
-def collection_search_stats(search_results: list[dict]) -> dict[str, dict]:
+def _topic_hits_in_chunks(
+    chunks: list[str],
+    seqs: list[int | None],
+    new_seq_set: set[int],
+    user_query: str,
+) -> int | None:
+    """How many NEW chunks mention the original user query.
+
+    Walks aligned chunks/seqs; for each chunk whose seq is in *new_seq_set*,
+    checks whether any content word (≥4 chars) from *user_query* appears as a
+    substring.  Words ≥6 chars also contribute a stem prefix (``word[:-2]``) so
+    Russian morphological variants are caught (e.g. «одноклеточные» stem
+    «одноклеточн» matches «одноклеточных»).
+
+    Returns the hit count, or ``None`` when *user_query* has no content words
+    (too short / all stopwords) — the signal is then unavailable, and the
+    display falls back to the raw ``+N`` novelty delta.
+    """
+    if not user_query or not chunks:
+        return None
+    query_words = [w.lower() for w in user_query.split() if len(w) >= 4]
+    if not query_words:
+        return None
+    terms: set[str] = set()
+    for w in query_words:
+        terms.add(w)
+        if len(w) >= 6:
+            terms.add(w[:-2])  # stem prefix for morphological variants
+    hits = 0
+    for i, s in enumerate(seqs):
+        if s is not None and s in new_seq_set and i < len(chunks):
+            chunk_lower = chunks[i].lower()
+            if any(term in chunk_lower for term in terms):
+                hits += 1
+    return hits
+
+
+def collection_search_stats(
+    search_results: list[dict], *, user_query: str | None = None
+) -> dict[str, dict]:
     """Per-collection statistics over every search actually executed.
 
     Walks the accumulated entries in execution order (entries that errored are
     not searches and are skipped; empty results count — an empty search is the
     strongest exhaustion signal). Returns an insertion-ordered
-    {collection: {searches, queries, retrieved, last_new, seqs_known}} where
+    {collection: {searches, queries, retrieved, last_new, seqs_known,
+    new_topic_hits, new_counts}} where
     `queries` lists the executed search queries in order (deduped — repeats
     are the angle-starvation signal the judge/rewriter must see), `retrieved`
     is the set of distinct chunk seqs seen so far, `last_new` is how many
     chunks of the LAST search were new vs all earlier searches of the same
-    collection, and `seqs_known=False` marks legacy tables without a seq
-    column (novelty can't be deduplicated → last_new=None, coverage omitted).
+    collection, `seqs_known=False` marks legacy tables without a seq
+    column (novelty can't be deduplicated → last_new=None, coverage omitted),
+    and `new_topic_hits`/`new_counts` are parallel per-search lists tracking
+    how many NEW chunks per search mention *user_query* — a declining trend
+    signals off-topic exhaustion even when the raw ``+N`` stays positive.
     """
     stats: dict[str, dict] = {}
     for r in search_results:
@@ -156,6 +199,8 @@ def collection_search_stats(search_results: list[dict]) -> dict[str, dict]:
                 "retrieved": set(),
                 "last_new": None,
                 "seqs_known": True,
+                "new_topic_hits": [],
+                "new_counts": [],
             },
         )
         st["searches"] += 1
@@ -171,6 +216,17 @@ def collection_search_stats(search_results: list[dict]) -> dict[str, dict]:
         new = seqs - st["retrieved"]
         st["last_new"] = len(new)
         st["retrieved"] |= new
+
+        # Per-search topic-hit trend: of the chunks NEW in this search, how
+        # many mention the original user query?  A falling trend means the
+        # collection is scraping increasingly off-topic parts of the document
+        # — exhaustion the raw +N cannot see.
+        if user_query:
+            seq_list = [s for s in (r.get("seqs") or []) if s is not None]
+            th = _topic_hits_in_chunks(chunks, seq_list, new, user_query)
+            if th is not None:
+                st["new_topic_hits"].append(th)
+                st["new_counts"].append(len(new))
     return stats
 
 
@@ -191,17 +247,34 @@ def _ru_new_chunks(n: int) -> str:
 
 
 def format_search_stats_for_judge(stats: dict[str, dict]) -> str:
-    """The judge's view: searched collections, novelty delta, executed queries.
+    """The judge's view: searched collections, topic-hit trend, executed queries.
 
-    The queries ground the judge's "is there an untried angle?" call and keep
-    its «альтернативные формулировки» from repeating what was already tried.
+    When ``user_query`` was passed to `collection_search_stats`, a per-search
+    topic-hit trend is shown («прирост по теме: 12/15 → 3/13 → 1/3») so the
+    judge can see the *dynamics* — a declining trend signals off-topic exhaustion
+    even when every ``+N`` is non-zero.  Without a query, falls back to the raw
+    ``+N`` novelty delta.
     """
     if not stats:
         return "(поисков ещё не было)"
     lines = []
     for collection, st in stats.items():
         line = f"- {collection}: обыскана {_ru_times(st['searches'])}"
-        if st["last_new"] is not None:
+        th = st.get("new_topic_hits", [])
+        nc = st.get("new_counts", [])
+        if th and nc and len(th) == len(nc):
+            if len(th) >= 2:
+                # Multi-search trend — the arrow chain shows dynamics.
+                parts = [f"{th[i]}/{nc[i]}" for i in range(len(th))]
+                line += f"\n  прирост по теме: {' → '.join(parts)}"
+            else:
+                # Single search — no trend to read, just the count.
+                line += (
+                    f", +{nc[0]} новых чанков"
+                    f" (по теме: {th[0]})"
+                )
+        elif st["last_new"] is not None:
+            # Fallback: no query given or query had no content words.
             line += f", последний поиск дал {_ru_new_chunks(st['last_new'])}"
         if st["queries"]:
             line += "\n  выполненные запросы: " + "; ".join(
