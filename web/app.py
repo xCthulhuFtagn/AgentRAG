@@ -493,10 +493,17 @@ def index():
                 value=current["reranking_enabled"],
             )
 
+            remove_irrelevant = ui.switch(
+                "Remove chunks assessed as irrelevant from search results",
+                value=current["reranking_remove_irrelevant"],
+            )
+            remove_irrelevant.bind_enabled_from(reranking, "value")
+
             def collect() -> dict:
                 return {
                     **current,
                     "reranking_enabled": bool(reranking.value),
+                    "reranking_remove_irrelevant": bool(remove_irrelevant.value),
                 }
 
             def apply():
@@ -511,7 +518,8 @@ def index():
                 vals = collect()
                 apply_btn.set_visibility(vals != current)
 
-            reranking.on_value_change(on_change)
+            for el in (reranking, remove_irrelevant):
+                el.on_value_change(on_change)
 
         result = await dialog
         if not result or result == current:
