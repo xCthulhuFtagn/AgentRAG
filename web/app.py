@@ -499,6 +499,14 @@ def index():
             )
             remove_irrelevant.bind_enabled_from(reranking, "value")
 
+            def _on_reranking_change(e):
+                # When reranking is turned off, force removal to False —
+                # a disabled switch must not silently stay ON.
+                if not e.value:
+                    remove_irrelevant.set_value(False)
+
+            reranking.on_value_change(_on_reranking_change)
+
             def collect() -> dict:
                 return {
                     **current,
