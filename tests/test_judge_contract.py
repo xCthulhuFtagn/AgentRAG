@@ -1,12 +1,13 @@
 """Contract tests: the Sufficient Context judge schema and mechanical search stats.
 
-The judge speaks the language of INFORMATION — sufficiency is judged against the
-question as asked (question_verbatim, copied not generated). Validation covers
-only what CODE consumes: feedback presence at sufficient=False (the Planner's
-iteration mode keys off it) and the collection-name ban (routing is the
-Planner's job); feedback's FORM is prompt guidance, deliberately not enforced.
-The searched set / novelty / coverage are computed by code
-(collection_search_stats), never reconstructed by the model.
+The judge classifies the RETRIEVAL STATE into a closed `verdict` (SGR Routing),
+judged against the question as asked. Validation covers only what CODE consumes:
+feedback presence on CONTINUE
+verdicts (the Planner's iteration mode keys off it) and the collection-name ban
+on non-synthesis verdicts (routing is the Planner's job); feedback's FORM is
+prompt guidance, deliberately not enforced. The searched set / novelty /
+coverage are computed by code (collection_search_stats), never reconstructed by
+the model.
 """
 
 import sys
@@ -40,13 +41,13 @@ TEMPLATE_FEEDBACK = (
 
 
 def judge_fields(**overrides) -> dict:
-    """A valid sufficient=True result; override fields per test."""
+    """A valid «ответ_найден» (→ synthesis) result; override fields per test."""
     fields = dict(
-        question_verbatim=QUERY,
         reason="Найдено общее описание Пушкина в учебнике литературы",
         draft_answer="Пушкин описан как выдающийся русский поэт",
         missing_parts=[],
-        sufficient=True,
+        retrieval_state="Все правдоподобные коллекции обысканы, новое не появляется",
+        verdict="ответ_найден",
         feedback="",
     )
     fields.update(overrides)
@@ -55,16 +56,38 @@ def judge_fields(**overrides) -> dict:
 
 # ── Base schema: information-gap contract ────────────────────────────────────
 
-def test_question_verbatim_is_required():
-    fields = judge_fields()
-    del fields["question_verbatim"]
-    with pytest.raises(ValidationError):
-        SufficientContextResult(**fields)
-
-
-def test_sufficient_true_needs_no_feedback():
+def test_answer_found_needs_no_feedback():
     result = SufficientContextResult(**judge_fields())
+    assert result.verdict == "ответ_найден"
     assert result.sufficient is True
+
+
+def test_exhausted_thin_routes_to_synthesis():
+    # The «пушкин» case: only scattered mentions, the corpus is exhausted —
+    # the verdict that used to require the model to set sufficient=True over a
+    # thin answer (which it refused to do) is now a named, namable situation.
+    result = SufficientContextResult(
+        **judge_fields(
+            verdict="исчерпано_есть_упоминания",
+            draft_answer="В источниках об этом есть только отдельные упоминания имени Пушкина.",
+        )
+    )
+    assert result.sufficient is True
+
+
+def test_nothing_found_is_not_sufficient():
+    result = SufficientContextResult(
+        **judge_fields(
+            verdict="ничего_не_найдено",
+            draft_answer="По теме не найдено ни одного упоминания.",
+        )
+    )
+    assert result.sufficient is False
+
+
+def test_invalid_verdict_value_is_rejected():
+    with pytest.raises(ValidationError):
+        SufficientContextResult(**judge_fields(verdict="достаточно"))
 
 
 def test_conditional_fields_are_required():
@@ -72,7 +95,7 @@ def test_conditional_fields_are_required():
     # (observed: a False verdict with no feedback key at all). With a default,
     # the omission silently becomes "" and the run dies in the validator after
     # burning retries; required keys never go missing in the first place.
-    for field in ("draft_answer", "missing_parts", "feedback"):
+    for field in ("draft_answer", "missing_parts", "retrieval_state", "verdict", "feedback"):
         fields = judge_fields()
         del fields[field]
         with pytest.raises(ValidationError):
@@ -89,47 +112,52 @@ def test_gigachat_schema_requires_every_field():
     fc = pytest.importorskip("langchain_gigachat.utils.function_calling")
     convert_to_gigachat_function = fc.convert_to_gigachat_function
 
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    schema = make_sufficient_context_schema(COLLECTIONS)
     converted = convert_to_gigachat_function(schema)
     converted = converted if isinstance(converted, dict) else converted.dict()
     assert set(converted["parameters"]["required"]) == {
-        "question_verbatim",
         "reason",
         "draft_answer",
         "missing_parts",
-        "sufficient",
+        "retrieval_state",
+        "verdict",
         "feedback",
     }
 
 
-def test_insufficient_without_feedback_is_rejected():
+def test_continue_verdict_without_feedback_is_rejected():
     # missing_parts alone is not enough: the Planner routes on feedback, and
-    # an empty feedback at False would silently demote it to initial-plan mode
-    # (is_iteration keys off bool(feedback)) — presence is a CODE contract.
+    # an empty feedback on a CONTINUE verdict would silently demote it to
+    # initial-plan mode (is_iteration keys off bool(feedback)) — presence is a
+    # CODE contract.
     with pytest.raises(ValidationError, match="ОБЯЗАТЕЛЬНО заполни feedback"):
         SufficientContextResult(
-            **judge_fields(sufficient=False, feedback="", missing_parts=["описание Пушкина"])
+            **judge_fields(
+                verdict="есть_неиспробованный_угол",
+                feedback="",
+                missing_parts=["описание Пушкина"],
+            )
         )
 
 
-def test_insufficient_free_form_feedback_is_valid():
+def test_continue_free_form_feedback_is_valid():
     # Form is guidance, not law: the only consumer of feedback is the
     # Planner-LLM reading prose, so semantically useful feedback worded
     # off-template must NOT be rejected — a re-prompt burned on formatting
     # can escalate a correct verdict into give_up.
     result = SufficientContextResult(
         **judge_fields(
-            sufficient=False,
+            verdict="есть_неиспробованный_угол",
             feedback="Отсутствует характеристика Пушкина; поиски дали только списки произведений.",
         )
     )
     assert result.sufficient is False
 
 
-def test_insufficient_with_template_feedback_passes():
+def test_continue_with_template_feedback_passes():
     result = SufficientContextResult(
         **judge_fields(
-            sufficient=False,
+            verdict="есть_необысканная_коллекция",
             feedback=TEMPLATE_FEEDBACK,
             missing_parts=["характеристика Пушкина как личности"],
         )
@@ -141,7 +169,7 @@ def test_blank_missing_parts_item_is_rejected():
     with pytest.raises(ValidationError, match="непустой"):
         SufficientContextResult(
             **judge_fields(
-                sufficient=False,
+                verdict="есть_неиспробованный_угол",
                 feedback=TEMPLATE_FEEDBACK,
                 missing_parts=["описание Пушкина", "  "],
             )
@@ -151,7 +179,7 @@ def test_blank_missing_parts_item_is_rejected():
 # ── Bound schema: node-time context baked in as validators ──────────────────
 
 def test_bound_schema_keeps_function_calling_name():
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    schema = make_sufficient_context_schema(COLLECTIONS)
     assert schema.__name__ == "SufficientContextResult"
 
 
@@ -159,52 +187,51 @@ def test_bound_schema_keeps_tool_description():
     # The docstring ships as the function-calling tool description; a subclass
     # gets __doc__=None unless the factory copies it, and langchain-gigachat
     # rejects a tool whose description is empty.
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    schema = make_sufficient_context_schema(COLLECTIONS)
     description = schema.model_json_schema().get("description", "")
     assert description.strip()
 
 
-def test_bound_rejects_paraphrased_question():
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
-    with pytest.raises(ValidationError, match="ДОСЛОВНОЙ"):
-        schema(**judge_fields(question_verbatim="Что известно о Пушкине?"))
-
-
-def test_bound_tolerates_trivial_copy_drift():
-    # Case / trailing «?» / whitespace drift is not paraphrase — re-prompting a
-    # weak model over it would burn retries for nothing.
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
-    result = schema(**judge_fields(question_verbatim="как описан пушкин  в источниках"))
-    assert result.sufficient is True
-
-
 def test_bound_rejects_collection_name_in_feedback():
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    schema = make_sufficient_context_schema(COLLECTIONS)
     with pytest.raises(ValidationError, match="имя\\s+коллекции|маршрут"):
         schema(
             **judge_fields(
-                sufficient=False,
+                verdict="есть_неиспробованный_угол",
                 feedback=TEMPLATE_FEEDBACK + " Поищи в 09-10_obschaya_biologiya.",
             )
         )
 
 
 def test_bound_rejects_collection_name_in_missing_parts():
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+    schema = make_sufficient_context_schema(COLLECTIONS)
     with pytest.raises(ValidationError, match="маршрут"):
         schema(
             **judge_fields(
-                sufficient=False,
+                verdict="есть_неиспробованный_угол",
                 feedback=TEMPLATE_FEEDBACK,
                 missing_parts=["поиск в коллекции 07_Rodnaya_literatura"],
             )
         )
 
 
-def test_bound_ignores_route_ban_when_sufficient():
-    # feedback/missing_parts are unused on the True path — burning a re-prompt
-    # over junk there would help nobody.
-    schema = make_sufficient_context_schema(COLLECTIONS, QUERY)
+def test_bound_bans_collection_name_on_nothing_found():
+    # ничего_не_найдено feeds missing_parts to the give_up renderer, so the
+    # name ban applies there too (not only on CONTINUE verdicts).
+    schema = make_sufficient_context_schema(COLLECTIONS)
+    with pytest.raises(ValidationError, match="маршрут"):
+        schema(
+            **judge_fields(
+                verdict="ничего_не_найдено",
+                missing_parts=["поиск в коллекции 07_Rodnaya_literatura"],
+            )
+        )
+
+
+def test_bound_ignores_route_ban_when_synthesis():
+    # feedback/missing_parts are unused on the synthesis verdicts — burning a
+    # re-prompt over junk there would help nobody.
+    schema = make_sufficient_context_schema(COLLECTIONS)
     result = schema(**judge_fields(feedback="см. 07_Rodnaya_literatura"))
     assert result.sufficient is True
 

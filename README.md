@@ -56,7 +56,7 @@ is searched to exhaustion.
 | **Planner** | Breaks query into search routes: `[(collection, subquery), ...]`; probes the least-implausible collections when nothing looks relevant (absence needs search evidence); Give Up only on an empty KB or iteration exhaustion |
 | **Query Rewriter** | Rewrites each route into a search-optimized query (routes rewritten concurrently via `asyncio.gather`); one search task per route |
 | **Search Fanout** | Parallel vector search via `asyncio.gather` in LanceDB |
-| **Sufficient Context** | Decides ONE thing: *would another search of the corpus materially improve the answer to the question as asked?* Answer found — sufficient; corpus exhausted on the topic — also sufficient (the answer states what the sources contain, even if thin); zero findings — never. Copies the question verbatim first (anti-inflation anchor), describes any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); reads the inventory + code-computed search statistics |
+| **Sufficient Context** | Decides ONE thing: *would another search of the corpus materially improve the answer to the question as asked?* Answer found — sufficient; corpus exhausted on the topic — also sufficient (the answer states what the sources contain, even if thin); zero findings — never. Emits a closed `verdict` (one of five named retrieval situations, not a bool), describing any gap in information terms (never names collections — routing is the Planner's job, enforced by validation); reads the inventory + code-computed search statistics |
 | **Synthesis** | Generates final answer with source citations; can describe every document from the inventory + retrieved chunks |
 | **Give Up** | System-generated refusal when context is exhausted; no LLM call |
 
@@ -147,7 +147,7 @@ web/                      # NiceGUI UI — imports from src/ (web → src, one-d
 ## How the iteration loop works
 
 1. Sufficient Context Agent decides **one question**: *would one more search of the corpus materially improve the answer to the question as asked?* It is a retrieval-state call, not a grade against an ideal answer:
-   - **Answer found** → sufficient (don't keep searching for "more details" the user never asked for; the schema's first field is a verbatim copy of the question — a copy-not-generate anchor against question inflation)
+   - **Answer found** → sufficient (don't keep searching for "more details" the user never asked for)
    - **Corpus exhausted on the topic** (every plausible collection searched to diminishing returns) → also sufficient: *"the sources contain only …"* is the system's honest answer, even if the findings are thin
    - **Zero findings** → never sufficient; once no routes remain, the system refuses honestly
    - **Concrete reason to expect more** (an unsearched plausible collection, an untried search angle) → insufficient, with the **information gap** described: *what fact* is missing, *what was found instead*, *what alternative phrasings* might name it
