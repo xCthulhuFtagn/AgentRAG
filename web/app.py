@@ -78,8 +78,8 @@ def index():
                             lambda x=pid: index_settings_dialog(x),
                         )
                         ui.menu_item(
-                            "Reranking settings",
-                            lambda x=pid: reranking_settings_dialog(x),
+                            "RAG process settings",
+                            lambda x=pid: rag_process_settings_dialog(x),
                         )
                         ui.menu_item("Open", lambda x=pid: open_project(x))
                         ui.menu_item(
@@ -473,20 +473,35 @@ def index():
         else:
             ui.notify("Settings saved — applied from the next search", color="positive")
 
-    async def reranking_settings_dialog(pid):
+    async def rag_process_settings_dialog(pid):
         meta = STORE.get(pid)
         if not meta:
             return
         current = STORE.get_index_settings(pid)
         with ui.dialog() as dialog, ui.card().classes("settings-card w-96"):
-            ui.label("Reranking settings").classes("font-bold text-green-800")
+            ui.label("RAG process settings").classes("font-bold text-green-800")
             ui.label(f"Project — {meta['name']}").classes("text-sm text-gray-500")
 
+            # ── Iteration budget ─────────────────────────────────────────
+            ui.label(
+                "Maximum search-and-judge iterations — how many times the pipeline "
+                "can loop back to search for missing information before giving up."
+            ).classes("text-xs text-gray-600 mt-2")
+
+            max_iter = ui.number(
+                "Max iterations",
+                value=current["max_iterations"],
+                min=1,
+                max=10,
+                precision=0,
+            ).classes("w-24")
+
+            # ── Reranking ─────────────────────────────────────────────────
             ui.label(
                 "LLM per-chunk relevance assessment — when enabled, the judge sees "
                 "a per-search topic-hit trend («прирост по теме») powered by LLM "
                 "relevance scores instead of keyword matching."
-            ).classes("text-xs text-gray-600 mt-2")
+            ).classes("text-xs text-gray-600 mt-4")
 
             reranking = ui.switch(
                 "Enable LLM reranking (per-chunk relevance checks)",
@@ -510,6 +525,7 @@ def index():
             def collect() -> dict:
                 return {
                     **current,
+                    "max_iterations": int(max_iter.value or current["max_iterations"]),
                     "reranking_enabled": bool(reranking.value),
                     "reranking_remove_irrelevant": bool(remove_irrelevant.value),
                 }
@@ -526,14 +542,14 @@ def index():
                 vals = collect()
                 apply_btn.set_visibility(vals != current)
 
-            for el in (reranking, remove_irrelevant):
+            for el in (max_iter, reranking, remove_irrelevant):
                 el.on_value_change(on_change)
 
         result = await dialog
         if not result or result == current:
             return
         STORE.set_index_settings(pid, result)
-        ui.notify("Reranking settings saved — applied from the next search", color="positive")
+        ui.notify("RAG process settings saved — applied from the next search", color="positive")
 
     async def trigger_reindex(pid):
         # Show frozen UI immediately, then reindex, then unfreeze.

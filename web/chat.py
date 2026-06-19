@@ -25,6 +25,7 @@ async def run_chat(project_id: str, query: str) -> AsyncIterator[tuple[str, obje
     initial = make_initial_state(
         query=query,
         db_path=db_path,
+        max_iterations=settings["max_iterations"],
         # Search-time knobs from the project's indexing settings — applied per
         # query, no reindex needed.
         stitch_settings={

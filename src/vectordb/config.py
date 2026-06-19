@@ -84,6 +84,13 @@ class VectorDBSettings(BaseSettings):
     # Nearest chunks per (collection, query) before stitching.
     search_top_k: int = Field(default=5, ge=1)
 
+    # ── Agent loop ───────────────────────────────────────────────────────────
+    # Maximum search-and-judge iterations before the pipeline gives up.
+    # Search-time (no reindex on change) — the project setting overrides
+    # general_settings.max_iterations; the .env value is the default for all
+    # projects.
+    max_iterations: int = Field(default=3, ge=1)
+
     # ── Reranking (LLM per-chunk relevance assessment) ──────────────────────
     # When True, search_fanout calls the LLM for every retrieved chunk to
     # assess relevance to the original query.  The per-search topic-hit trend

@@ -172,10 +172,11 @@ def resolve_index_settings(overrides: dict | None = None) -> dict:
     project): four index-time ones (INDEX_TIME_KEYS — consumed by
     `index_files`) plus the two neighbor-stitching ones (`expand_padding`,
     `bridge_gap` — search-time, threaded into `gather_neighbors` via graph
-    state) and `reranking_enabled` (search-time — enables LLM per-chunk
-    relevance assessment in search_fanout). Any key absent or None falls
-    back to the global `vdb_settings` (.env) value — so the .env values
-    are the defaults.
+    state), `reranking_enabled` / `reranking_remove_irrelevant` (search-time,
+    LLM per-chunk relevance assessment in search_fanout), and `max_iterations`
+    (search-time, iteration budget for the planner→judge loop). Any key absent
+    or None falls back to the global `vdb_settings` (.env) value — so the .env
+    values are the defaults.
     """
     resolved = {
         "chunk_size": vdb_settings.chunk_size,
@@ -186,6 +187,7 @@ def resolve_index_settings(overrides: dict | None = None) -> dict:
         "bridge_gap": vdb_settings.bridge_gap,
         "reranking_enabled": vdb_settings.reranking_enabled,
         "reranking_remove_irrelevant": vdb_settings.reranking_remove_irrelevant,
+        "max_iterations": vdb_settings.max_iterations,
     }
     for key, value in (overrides or {}).items():
         if key in resolved and value is not None:
