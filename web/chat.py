@@ -29,6 +29,7 @@ async def run_chat(project_id: str, query: str) -> AsyncIterator[tuple[str, obje
         # Search-time knobs from the project's indexing settings — applied per
         # query, no reindex needed.
         stitch_settings={
+            "search_top_k": settings["search_top_k"],
             "expand_padding": settings["expand_padding"],
             "bridge_gap": settings["bridge_gap"],
             "reranking_enabled": settings["reranking_enabled"],

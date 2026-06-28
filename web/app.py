@@ -13,7 +13,7 @@ from pathlib import Path
 from nicegui import ui, events
 
 from src.logging_setup import setup_logging
-from src.vectordb.indexer import INDEX_TIME_KEYS, SUPPORTED_SUFFIXES
+from src.vectordb.indexer import SUPPORTED_SUFFIXES
 from web import runtime
 from web.chat import run_chat
 from web.indexing import reindex_project, update_project_index
@@ -395,40 +395,18 @@ def index():
             ).classes("w-full")
             describe_chars.bind_enabled_from(descriptions, "value")
 
-            ui.label("Neighbor stitching — applies to the next search, no reindex").classes(
-                "text-xs font-medium text-green-700 mt-2"
-            )
-            expand_padding = ui.number(
-                "Stitch padding (chunks pulled around each hit)",
-                value=current["expand_padding"], min=0, max=10, step=1, precision=0,
-            ).classes("w-full")
-            bridge_gap = ui.number(
-                "Merge gap (max chunks between windows to bridge)",
-                value=current["bridge_gap"], min=0, max=20, step=1, precision=0,
-            ).classes("w-full")
-
             def collect() -> dict:
+                # Spread current so the project's search-time overrides (the
+                # Retrieval settings) survive an index-time save untouched.
                 return {
+                    **current,
                     "chunk_size": int(chunk_size.value or current["chunk_size"]),
                     "chunk_overlap": int(chunk_overlap.value or 0),
                     "descriptions_enabled": bool(descriptions.value),
                     "describe_max_chars": int(
                         describe_chars.value or current["describe_max_chars"]
                     ),
-                    "expand_padding": int(
-                        current["expand_padding"]
-                        if expand_padding.value is None else expand_padding.value
-                    ),
-                    "bridge_gap": int(
-                        current["bridge_gap"]
-                        if bridge_gap.value is None else bridge_gap.value
-                    ),
                 }
-
-            def needs_reindex(vals: dict) -> bool:
-                # Only the index-time knobs invalidate stored chunks; the
-                # stitching ones are read at search time.
-                return any(vals[k] != current[k] for k in INDEX_TIME_KEYS)
 
             def apply():
                 vals = collect()
@@ -447,31 +425,22 @@ def index():
                     .props("color=red")
                 )
             # Hidden until the first change — closing an untouched dialog is a
-            # plain cancel; reverting every field hides it again. The label
-            # tells the truth about the cost: stitching-only changes don't
-            # rebuild anything.
+            # plain cancel; reverting every field hides it again. Every knob
+            # here is index-time, so applying always rebuilds the index.
             apply_btn.set_visibility(False)
 
             def on_change(_=None):
-                vals = collect()
-                apply_btn.set_visibility(vals != current)
-                apply_btn.set_text(
-                    "Apply — full reindex" if needs_reindex(vals) else "Apply"
-                )
+                apply_btn.set_visibility(collect() != current)
 
-            for el in (chunk_size, chunk_overlap, descriptions, describe_chars,
-                       expand_padding, bridge_gap):
+            for el in (chunk_size, chunk_overlap, descriptions, describe_chars):
                 el.on_value_change(on_change)
 
         result = await dialog
         if not result or result == current:
             return
         STORE.set_index_settings(pid, result)
-        if needs_reindex(result):
-            ui.notify("Settings saved — rebuilding the index…", color="positive")
-            await trigger_reindex(pid)
-        else:
-            ui.notify("Settings saved — applied from the next search", color="positive")
+        ui.notify("Settings saved — rebuilding the index…", color="positive")
+        await trigger_reindex(pid)
 
     async def rag_process_settings_dialog(pid):
         meta = STORE.get(pid)
@@ -481,27 +450,34 @@ def index():
         with ui.dialog() as dialog, ui.card().classes("settings-card w-96"):
             ui.label("RAG process settings").classes("font-bold text-green-800")
             ui.label(f"Project — {meta['name']}").classes("text-sm text-gray-500")
-
-            # ── Iteration budget ─────────────────────────────────────────
             ui.label(
-                "Maximum search-and-judge iterations — how many times the pipeline "
-                "can loop back to search for missing information before giving up."
-            ).classes("text-xs text-gray-600 mt-2")
+                "All apply from the next search — no reindex."
+            ).classes("text-xs text-gray-500")
 
-            max_iter = ui.number(
-                "Max iterations",
-                value=current["max_iterations"],
-                min=1,
-                max=10,
-                precision=0,
-            ).classes("w-24")
+            ui.label("Search & neighbor stitching").classes(
+                "text-xs font-medium text-green-700 mt-2"
+            )
+            search_top_k = ui.number(
+                "k blocks (nearest chunks fetched per search)",
+                value=current["search_top_k"], min=1, max=50, step=1, precision=0,
+            ).classes("w-full")
+            expand_padding = ui.number(
+                "Stitch padding (chunks pulled around each hit)",
+                value=current["expand_padding"], min=0, max=10, step=1, precision=0,
+            ).classes("w-full")
+            bridge_gap = ui.number(
+                "Merge gap (max chunks between windows to bridge)",
+                value=current["bridge_gap"], min=0, max=20, step=1, precision=0,
+            ).classes("w-full")
 
-            # ── Reranking ─────────────────────────────────────────────────
+            ui.label("Reranking").classes(
+                "text-xs font-medium text-green-700 mt-2"
+            )
             ui.label(
                 "LLM per-chunk relevance assessment — when enabled, the judge sees "
                 "a per-search topic-hit trend («прирост по теме») powered by LLM "
                 "relevance scores instead of keyword matching."
-            ).classes("text-xs text-gray-600 mt-4")
+            ).classes("text-xs text-gray-600")
 
             reranking = ui.switch(
                 "Enable LLM reranking (per-chunk relevance checks)",
@@ -522,9 +498,36 @@ def index():
 
             reranking.on_value_change(_on_reranking_change)
 
+            ui.label("Iteration budget").classes(
+                "text-xs font-medium text-green-700 mt-2"
+            )
+            ui.label(
+                "Maximum search-and-judge iterations — how many times the pipeline "
+                "can loop back to search for missing information before giving up."
+            ).classes("text-xs text-gray-600")
+            max_iter = ui.number(
+                "Max iterations",
+                value=current["max_iterations"],
+                min=1, max=10, step=1, precision=0,
+            ).classes("w-24")
+
             def collect() -> dict:
+                # Spread current so an index-time knob touched elsewhere isn't
+                # reset here; this dialog only owns the search-time keys.
                 return {
                     **current,
+                    "search_top_k": int(
+                        current["search_top_k"]
+                        if search_top_k.value is None else search_top_k.value
+                    ),
+                    "expand_padding": int(
+                        current["expand_padding"]
+                        if expand_padding.value is None else expand_padding.value
+                    ),
+                    "bridge_gap": int(
+                        current["bridge_gap"]
+                        if bridge_gap.value is None else bridge_gap.value
+                    ),
                     "max_iterations": int(max_iter.value or current["max_iterations"]),
                     "reranking_enabled": bool(reranking.value),
                     "reranking_remove_irrelevant": bool(remove_irrelevant.value),
@@ -542,7 +545,8 @@ def index():
                 vals = collect()
                 apply_btn.set_visibility(vals != current)
 
-            for el in (max_iter, reranking, remove_irrelevant):
+            for el in (search_top_k, expand_padding, bridge_gap,
+                       max_iter, reranking, remove_irrelevant):
                 el.on_value_change(on_change)
 
         result = await dialog

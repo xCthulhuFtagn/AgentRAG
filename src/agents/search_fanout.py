@@ -33,6 +33,8 @@ async def search_fanout_node(
     stitch = state.get("stitch_settings") or {}
     padding = stitch.get("expand_padding")
     bridge_gap = stitch.get("bridge_gap")
+    top_k = stitch.get("search_top_k")
+    top_k = vdb_settings.search_top_k if top_k is None else top_k
     stitch_kwargs = {
         "padding": vdb_settings.expand_padding if padding is None else padding,
         "bridge_gap": vdb_settings.bridge_gap if bridge_gap is None else bridge_gap,
@@ -51,7 +53,7 @@ async def search_fanout_node(
             result = await vector_search.ainvoke({
                 "query": query,
                 "collection": collection,
-                "top_k": vdb_settings.search_top_k,
+                "top_k": top_k,
                 "db_path": db_path,
             })
             chunks = result.get("chunks", [])

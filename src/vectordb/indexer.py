@@ -170,19 +170,21 @@ def resolve_index_settings(overrides: dict | None = None) -> dict:
 
     The knobs a caller may tune per corpus (the web UI stores them per
     project): four index-time ones (INDEX_TIME_KEYS — consumed by
-    `index_files`) plus the two neighbor-stitching ones (`expand_padding`,
-    `bridge_gap` — search-time, threaded into `gather_neighbors` via graph
-    state), `reranking_enabled` / `reranking_remove_irrelevant` (search-time,
-    LLM per-chunk relevance assessment in search_fanout), and `max_iterations`
-    (search-time, iteration budget for the planner→judge loop). Any key absent
-    or None falls back to the global `vdb_settings` (.env) value — so the .env
-    values are the defaults.
+    `index_files`) plus the search-time ones — `search_top_k` (nearest chunks
+    fetched per search before stitching), the two neighbor-stitching ones
+    (`expand_padding`, `bridge_gap` — threaded into `gather_neighbors` via
+    graph state), `reranking_enabled` / `reranking_remove_irrelevant` (LLM
+    per-chunk relevance assessment in search_fanout) and `max_iterations`
+    (iteration budget for the planner→judge loop). Any key absent or None falls
+    back to the global `vdb_settings` (.env) value — so the .env values are the
+    defaults.
     """
     resolved = {
         "chunk_size": vdb_settings.chunk_size,
         "chunk_overlap": vdb_settings.chunk_overlap,
         "descriptions_enabled": vdb_settings.descriptions_enabled,
         "describe_max_chars": vdb_settings.describe_max_chars,
+        "search_top_k": vdb_settings.search_top_k,
         "expand_padding": vdb_settings.expand_padding,
         "bridge_gap": vdb_settings.bridge_gap,
         "reranking_enabled": vdb_settings.reranking_enabled,

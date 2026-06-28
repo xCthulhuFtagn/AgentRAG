@@ -293,9 +293,9 @@ class AgentRAGState(TypedDict):
     # None → global LANCE_DB_PATH (CLI default).
     db_path: Optional[str]
 
-    # Per-project neighbor-stitching overrides for search_fanout:
-    # {"expand_padding": int, "bridge_gap": int}. None / missing keys →
-    # the global vdb_settings values (CLI default).
+    # Per-project search-time overrides for search_fanout:
+    # {"search_top_k": int, "expand_padding": int, "bridge_gap": int, ...}.
+    # None / missing keys → the global vdb_settings values (CLI default).
     stitch_settings: Optional[dict]
 
     # Planner
@@ -344,8 +344,9 @@ def make_initial_state(
 
     db_path scopes vector search to one LanceDB (per-project isolation).
     None → global LANCE_DB_PATH (CLI default, backward-compatible).
-    stitch_settings carries per-project neighbor-stitching overrides
-    (expand_padding/bridge_gap) into search_fanout; None → vdb_settings.
+    stitch_settings carries per-project search-time overrides
+    (search_top_k/expand_padding/bridge_gap/…) into search_fanout;
+    None → vdb_settings.
     """
     return AgentRAGState(
         query=query,
