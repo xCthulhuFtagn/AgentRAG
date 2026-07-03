@@ -13,6 +13,7 @@ Both use the project's own indexing settings (ProjectStore.get_index_settings).
 import shutil
 from pathlib import Path
 
+from src.vectordb.client import invalidate_db_cache
 from src.vectordb.indexer import (
     SUPPORTED_SUFFIXES,
     index_documents,
@@ -34,7 +35,10 @@ async def reindex_project(pid: str) -> None:
             db_path = store.db_path(pid)
             files_dir = store.files_dir(pid)
 
-            # Wipe existing tables so deleted/renamed files don't linger.
+            # Wipe existing tables so deleted/renamed files don't linger. Drop
+            # any cached connection first — otherwise it would keep pointing at
+            # the now-deleted directory once index_documents recreates it.
+            invalidate_db_cache(db_path)
             db_dir = Path(db_path)
             if db_dir.exists():
                 shutil.rmtree(db_dir, ignore_errors=True)

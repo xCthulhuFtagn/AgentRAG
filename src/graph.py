@@ -6,7 +6,6 @@ Entry/exit: set_entry_point + Command(goto=END).
 """
 
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 
 from src.state import AgentRAGState
 from src.agents.common import logged_node, llm_failsafe
@@ -79,4 +78,8 @@ def build_graph() -> StateGraph:
 
     workflow.set_entry_point("planner")
 
-    return workflow.compile(checkpointer=MemorySaver())
+    # No checkpointer: each query is a single, independent run (the web layer
+    # gives it a fresh thread_id and carries no conversation history across
+    # messages) — a MemorySaver would only accumulate every past run's full
+    # state (all retrieved chunks included) in process memory forever.
+    return workflow.compile()

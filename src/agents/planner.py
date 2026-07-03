@@ -23,12 +23,62 @@ from src.agents.common import (
     generate_structured,
 )
 from src.vectordb.config import vdb_settings
+from src.vectordb.embeddings import embed_batch
 from src.vectordb.tools import count_chunks, list_collections, list_collections_described
 
 # Probe backstop cap: when the model declines every route on the initial turn,
 # this many collections are searched with the raw query before any refusal —
 # vector search is LLM-free, so the probe costs no tokens by itself.
 _PROBE_LIMIT = 3
+
+
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = sum(x * x for x in a) ** 0.5
+    nb = sum(x * x for x in b) ** 0.5
+    return dot / (na * nb) if na and nb else 0.0
+
+
+async def _rank_collections_for_probe(
+    query: str, described: list[dict], limit: int
+) -> list[str]:
+    """Rank collections for the probe backstop by embedding similarity.
+
+    "Least implausible" (CLAUDE.md's phrase for the probe) needs an actual
+    ranking signal — picking the first `limit` collections in listing order is
+    arbitrary and has nothing to do with plausibility. Cosine similarity
+    between the query and each collection's index-time description (the same
+    FastEmbed model already used for chunk embeddings — local, no LLM call)
+    gives a real, if approximate, "which collection reads closest to this
+    question" signal.
+
+    Collections with an empty description (descriptions disabled, or indexed
+    before the feature existed) have nothing to rank on — they sort after
+    every ranked collection, in their original order. Any embedding failure
+    (e.g. the model cache is unavailable) falls back to the original listing
+    order entirely: this is a best-effort backstop, not a correctness
+    requirement — a fixed-order probe was the prior behavior anyway.
+    """
+    with_text = [c for c in described if c.get("description")]
+    without_text = [c["collection"] for c in described if not c.get("description")]
+    if not with_text:
+        return [c["collection"] for c in described][:limit]
+
+    try:
+        vectors = await embed_batch([query] + [c["description"] for c in with_text])
+    except Exception:
+        return [c["collection"] for c in described][:limit]
+
+    q_vec, doc_vecs = vectors[0], vectors[1:]
+    ranked = [
+        c["collection"]
+        for c, _ in sorted(
+            zip(with_text, doc_vecs),
+            key=lambda pair: _cosine(q_vec, pair[1]),
+            reverse=True,
+        )
+    ]
+    return (ranked + without_text)[:limit]
 
 PLANNER_PROMPT = """Ты — Агент-Планировщик (Planner) в системе Agentic RAG.
 
@@ -105,15 +155,15 @@ async def planner_node(
     db_path = state.get("db_path")
     if vdb_settings.descriptions_enabled:
         described = await list_collections_described(db_path)
-        available = [c["collection"] for c in described]
         lines = [
             f"- {c['collection']} — {c['description'] or '(без описания)'}"
             for c in described
         ]
     else:
         names = await list_collections.ainvoke({"db_path": db_path})
-        available = list(names)
+        described = [{"collection": n, "description": ""} for n in names]
         lines = [f"- {n}" for n in names]
+    available = [c["collection"] for c in described]
     collections_str = (
         "\n".join(lines)
         if lines
@@ -176,8 +226,13 @@ async def planner_node(
             # Epistemic backstop: a claim of absence needs retrieval evidence.
             # Descriptions can justify routing priority, never absence — the
             # prompt already says "probe instead of refusing", so reaching this
-            # branch means the model declined anyway. Probe a few collections
-            # with the raw query and let the judge rule on the actual results.
+            # branch means the model declined anyway. Probe the LEAST
+            # IMPLAUSIBLE collections (by embedding similarity of the query to
+            # each description, not by listing order) with the raw query, and
+            # let the judge rule on the actual results.
+            probe_collections = await _rank_collections_for_probe(
+                state["query"], described, _PROBE_LIMIT
+            )
             probe_steps = [
                 {
                     "collection": collection,
@@ -188,7 +243,7 @@ async def planner_node(
                         "проверяем реальным поиском."
                     ),
                 }
-                for collection in available[:_PROBE_LIMIT]
+                for collection in probe_collections
             ]
             trace_entry = make_trace_entry(
                 agent="planner",
@@ -212,10 +267,10 @@ async def planner_node(
         # all, or an iteration concluded every plausible collection is already
         # searched to exhaustion. Pure RAG — no general-knowledge fallback.
         reason = (
-            "Every plausibly-relevant collection has already been searched to "
-            "exhaustion — no new route could close the remaining gap."
+            "Все правдоподобно-релевантные коллекции уже обысканы до полного "
+            "исчерпания — новый маршрут не смог бы закрыть оставшийся пробел."
             if is_iteration
-            else "The knowledge base contains no indexed collections."
+            else "В базе знаний нет ни одной проиндексированной коллекции."
         )
         return Command(
             goto="give_up",

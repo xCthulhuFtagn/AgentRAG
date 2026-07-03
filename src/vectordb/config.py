@@ -56,6 +56,13 @@ class VectorDBSettings(BaseSettings):
     # Title/abstract/intro carry most of the routing signal; this bounds cost.
     describe_max_chars: int = Field(default=6000, ge=1)
 
+    # How many files index_files processes concurrently. Extraction (CPU),
+    # embedding (CPU/ONNX) and the description LLM call (network) per file were
+    # previously run one file at a time even though nothing serializes them
+    # across DIFFERENT files (each writes its own table) — this bounds the
+    # concurrency instead of leaving it at 1.
+    index_concurrency: int = Field(default=3, ge=1)
+
     # ── OCR (LiteParse) ──────────────────────────────────────────────────────
     # By default LiteParse OCRs scanned/image content with its built-in Tesseract,
     # which is noisy on tiny embedded images ("Image too small to scale!!") and
@@ -83,6 +90,17 @@ class VectorDBSettings(BaseSettings):
     # ── Search ───────────────────────────────────────────────────────────────
     # Nearest chunks per (collection, query) before stitching.
     search_top_k: int = Field(default=5, ge=1)
+
+    # Hybrid search: fuse the vector KNN results with a full-text (BM25-style)
+    # search over the same query via Reciprocal Rank Fusion. Vector-only search
+    # is weak on exact terms, names, and abbreviations — precisely what drives
+    # the judge's "try an alternative phrasing" iteration loop — so a keyword
+    # match on the literal term recovers hits pure embedding similarity misses.
+    # Search-time (no reindex on change for THIS flag), threaded via
+    # stitch_settings — but the FTS index it depends on is built at index time
+    # (see indexer.py), so enabling it for an already-indexed project only
+    # takes effect after a reindex.
+    hybrid_search_enabled: bool = True
 
     # ── Agent loop ───────────────────────────────────────────────────────────
     # Maximum search-and-judge iterations before the pipeline gives up.

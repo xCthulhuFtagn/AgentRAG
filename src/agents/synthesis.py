@@ -8,7 +8,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import Command
 
 from src.state import AgentRAGState, make_trace_entry
-from src.agents.common import get_llm, get_inventory_str
+from src.agents.common import get_llm, get_inventory_str, render_search_context
 from src.llm_retry import ainvoke_with_retry
 
 SYNTHESIS_PROMPT = """Ты — Агент-Синтезатор (Synthesis) в системе Agentic RAG.
@@ -50,22 +50,15 @@ async def synthesis_node(
     llm = get_llm(temperature=0.0)
 
     # search_results records every executed search, empty ones included (the
-    # statistics need them) — only entries that brought chunks are sources.
-    chunked = [r for r in state.get("search_results", []) if r.get("chunks")]
-    results_str = ""
-    for i, r in enumerate(chunked):
-        chunks_str = "\n---\n".join(r.get("chunks", []))
-        # Collection names are backticked here and in the inventory: the answer
-        # is rendered as markdown, where bare underscores turn into italics —
-        # the model mirrors the formatting it sees in the prompt.
-        results_str += (
-            f"\n### Источник {i+1}: `{r.get('collection', 'неизвестно')}`\n"
-            f"Запрос: {r.get('subquery', 'неизвестно')}\n"
-            f"Содержимое:\n{chunks_str}\n"
-        )
-
-    if not results_str:
-        results_str = "(контекст не получен)"
+    # statistics need them) — render_search_context groups by collection and
+    # dedupes by seq, so a chunk re-fetched across iterations appears once.
+    # Collection names are backticked: the answer is rendered as markdown,
+    # where bare underscores turn into italics — the model mirrors the
+    # formatting it sees in the prompt.
+    results_str = (
+        render_search_context(state.get("search_results", []), backtick_names=True)
+        or "(контекст не получен)"
+    )
 
     # Synthesis is only reached after the judge ruled the context sufficient.
     context_note = "Контекст признан достаточным — отвечай полностью на его основе."

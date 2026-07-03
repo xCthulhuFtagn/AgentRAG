@@ -42,14 +42,14 @@ def _build_llm_error_answer(state: AgentRAGState) -> str:
     so the system reports that honestly instead of crashing.
     """
     return (
-        f"## Unable to answer — language model error\n\n"
-        f"**Question:** {state['query']}\n\n"
-        f"**What happened:** The system's language model failed to return a "
-        f"valid response after several attempts, so this request could not be "
-        f"processed.\n\n"
-        f"**Details:** {state.get('llm_error', 'unspecified model error')}\n\n"
-        f"**Recommendation:** This is usually transient (model overload or a "
-        f"temporary API error). Please try again in a moment."
+        f"## Не удалось ответить — ошибка языковой модели\n\n"
+        f"**Вопрос:** {state['query']}\n\n"
+        f"**Что произошло:** Языковая модель системы не смогла вернуть "
+        f"корректный ответ после нескольких попыток, поэтому запрос не "
+        f"удалось обработать.\n\n"
+        f"**Подробности:** {state.get('llm_error', 'ошибка модели не уточнена')}\n\n"
+        f"**Рекомендация:** Обычно это временная проблема (перегрузка модели "
+        f"или сбой API). Попробуйте повторить запрос через некоторое время."
     )
 
 
@@ -78,46 +78,47 @@ def _build_refusal_answer(state: AgentRAGState, collection_names: list[str]) -> 
 
     if searched_collections:
         found_summary = (
-            f"- Searched {len(searched_collections)} collection(s): "
+            f"- Обыскано коллекций: {len(searched_collections)} — "
             f"{', '.join(f'`{c}`' for c in sorted(searched_collections))}\n"
         )
         found_summary += (
-            f"- Retrieved {found_chunks} text chunks total\n"
+            f"- Всего извлечено фрагментов текста: {found_chunks}\n"
             if found_chunks
-            else "- No relevant text chunks were retrieved\n"
+            else "- Ни одного релевантного фрагмента не найдено\n"
         )
     else:
-        found_summary = "- No search was executed (the knowledge base has no searchable collections)\n"
+        found_summary = "- Поиск не выполнялся (в базе знаний нет коллекций для поиска)\n"
 
     # What's missing
     missing = state.get("missing_parts", []) or [
-        "specific information required to answer the question"
+        "конкретная информация, необходимая для ответа на вопрос"
     ]
     missing_str = "\n".join(f"  • {m}" for m in missing)
 
     # Search attempts
     queries_tried = state.get("rewritten_queries", [])
     queries_str = (
-        "\n".join(f"  • {q}" for q in queries_tried[-10:]) or "  (none)"
+        "\n".join(f"  • {q}" for q in queries_tried[-10:]) or "  (нет)"
     )
 
     # The judge's reason legitimately mentions collections (its verdict
     # reasoning); wrap any bare names so markdown doesn't eat the underscores.
     reason = _backtick_names(
-        state.get("sufficient_reason", "Insufficient context retrieved"),
+        state.get("sufficient_reason", "Найденного контекста недостаточно"),
         list(set(collection_names) | searched_collections),
     )
 
     return (
-        f"## Unable to fully answer\n\n"
-        f"**Question:** {query}\n\n"
-        f"**What was found:**\n{found_summary}\n"
-        f"**What is missing:**\n{missing_str}\n\n"
-        f"**Why:** {reason}\n\n"
-        f"**Search attempts ({iteration}/{max_iter} iterations):**\n{queries_str}\n\n"
-        f"**Recommendation:** The requested information may not exist in the indexed "
-        f"documents. Try rephrasing the query, indexing additional documents, "
-        f"or breaking the question into smaller parts."
+        f"## Не удалось полностью ответить\n\n"
+        f"**Вопрос:** {query}\n\n"
+        f"**Что найдено:**\n{found_summary}\n"
+        f"**Чего не хватает:**\n{missing_str}\n\n"
+        f"**Почему:** {reason}\n\n"
+        f"**Попытки поиска ({iteration}/{max_iter} итераций):**\n{queries_str}\n\n"
+        f"**Рекомендация:** Возможно, запрошенная информация отсутствует в "
+        f"проиндексированных документах. Попробуйте переформулировать вопрос, "
+        f"проиндексировать дополнительные документы или разбить вопрос на более "
+        f"простые части."
     )
 
 

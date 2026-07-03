@@ -1,6 +1,6 @@
 """App-global runtime state — built once, shared across all clients.
 
-- GRAPH: the compiled Agentic RAG graph (MemorySaver checkpointer).
+- GRAPH: the compiled Agentic RAG graph (no checkpointer — see src/graph.py).
 - STORE: the ProjectStore.
 - per-project status (idle | reindexing) and asyncio locks for reindex.
 """

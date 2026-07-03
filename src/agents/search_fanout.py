@@ -28,8 +28,10 @@ async def search_fanout_node(
     """Search Fanout: execute vector searches, command sufficient_context."""
     db_path = state.get("db_path")
 
-    # Per-project stitching overrides (web threads them via make_initial_state);
-    # missing keys fall back to the global vdb_settings defaults.
+    # Per-project overrides (web threads them via make_initial_state); missing
+    # keys fall back to the global vdb_settings defaults — this must hold for
+    # EVERY key here (the CLI passes no stitch_settings at all, so it relies
+    # entirely on these fallbacks to honor .env).
     stitch = state.get("stitch_settings") or {}
     padding = stitch.get("expand_padding")
     bridge_gap = stitch.get("bridge_gap")
@@ -39,6 +41,20 @@ async def search_fanout_node(
         "padding": vdb_settings.expand_padding if padding is None else padding,
         "bridge_gap": vdb_settings.bridge_gap if bridge_gap is None else bridge_gap,
     }
+    reranking_enabled = stitch.get("reranking_enabled")
+    reranking_enabled = (
+        vdb_settings.reranking_enabled if reranking_enabled is None else reranking_enabled
+    )
+    remove_irrelevant = stitch.get("reranking_remove_irrelevant")
+    remove_irrelevant = (
+        vdb_settings.reranking_remove_irrelevant
+        if remove_irrelevant is None
+        else remove_irrelevant
+    )
+    hybrid_enabled = stitch.get("hybrid_search_enabled")
+    hybrid_enabled = (
+        vdb_settings.hybrid_search_enabled if hybrid_enabled is None else hybrid_enabled
+    )
 
     # Each task targets one concrete collection (query_rewriter built them from
     # the planner's routes); search every (collection, query) pair in parallel.
@@ -49,33 +65,25 @@ async def search_fanout_node(
     ]
 
     async def search_one(collection: str, query: str) -> dict:
+        """Raw KNN hits for one (collection, query) pair — no stitching yet.
+
+        Stitching happens later, over whichever hits survive reranking, so a
+        contiguous block pulled in by gather_neighbors is never independently
+        judged or amputated by relevance filtering (see below).
+        """
         try:
             result = await vector_search.ainvoke({
                 "query": query,
                 "collection": collection,
                 "top_k": top_k,
                 "db_path": db_path,
+                "hybrid": hybrid_enabled,
             })
-            chunks = result.get("chunks", [])
-            seqs = result.get("seqs", [])
-
-            # Deterministic context expansion: stitch each hit back to its
-            # contiguous seq-neighborhood so truncated structural blocks (TOC,
-            # reference lists) come back whole. Legacy tables (no seq) → no-op.
-            if seqs and any(s is not None for s in seqs):
-                expanded = await gather_neighbors(
-                    result.get("collection", collection), seqs, db_path,
-                    **stitch_kwargs,
-                )
-                if expanded:
-                    chunks = [e["text"] for e in expanded]
-                    seqs = [e["seq"] for e in expanded]
-
             return {
                 "collection": result.get("collection", collection),
                 "subquery": query,
-                "chunks": chunks,
-                "seqs": seqs,
+                "chunks": result.get("chunks", []),
+                "seqs": result.get("seqs", []),
                 "scores": result.get("scores", []),
             }
         except Exception as e:
@@ -90,51 +98,80 @@ async def search_fanout_node(
 
     results = await asyncio.gather(*[search_one(c, q) for c, q in resolved])
 
-    # ── LLM per-chunk relevance assessment (opt-in) ───────────────────────
-    # When the project has reranking enabled, every retrieved chunk gets an
-    # independent LLM call judging relevance to the original query.  Results
-    # are stored as a "relevant" list (bools, aligned with chunks) in each
-    # search result dict — consumed by collection_search_stats for the
-    # per-search topic-hit trend.
-    stitch = state.get("stitch_settings") or {}
-    if stitch.get("reranking_enabled", True):
+    # ── LLM per-chunk relevance assessment (opt-in) — over KNN HITS only ────
+    # Assessed BEFORE stitching: only the actual hits are judged, so a
+    # coherent structural block pulled in afterward by gather_neighbors is
+    # never independently judged (or amputated) chunk by chunk. Results are
+    # stored as a "relevant" list (bool | None, aligned with chunks at this
+    # point) — consumed by collection_search_stats for the topic-hit trend.
+    if reranking_enabled:
         from src.agents.common import assess_chunks_relevance
 
         query = state["query"]
-        # Collect all chunks (flatten), track which result they belong to.
+        # Collect all HIT chunks (flatten across non-errored results).
         all_chunks: list[str] = []
         chunk_map: list[tuple[int, int]] = []  # (result_idx, chunk_idx)
         for ri, r in enumerate(results):
+            if r.get("error"):
+                continue
             for ci in range(len(r.get("chunks", []))):
                 all_chunks.append(r["chunks"][ci])
                 chunk_map.append((ri, ci))
 
         if all_chunks:
             relevance = await assess_chunks_relevance(all_chunks, query)
-            # Reassemble: build a "relevant" list per result, aligned with chunks.
             for ri, r in enumerate(results):
-                r.setdefault("relevant", [])
+                if not r.get("error"):
+                    r.setdefault("relevant", [None] * len(r.get("chunks", [])))
             for (ri, ci), rel in zip(chunk_map, relevance):
-                rl = results[ri]["relevant"]
-                while len(rl) <= ci:
-                    rl.append(False)
-                rl[ci] = rel
+                results[ri]["relevant"][ci] = rel
 
-        # ── Remove irrelevant chunks (opt-in) ────────────────────────────
-        if stitch.get("reranking_remove_irrelevant", False):
+        # ── Remove hits CONFIRMED irrelevant (opt-in) — before stitching ────
+        # Only a strict False drops a hit. True keeps it, and None (the
+        # assessment call itself failed — unknown, not "irrelevant") also
+        # keeps it: a transient API error must never silently discard a chunk.
+        if remove_irrelevant:
             for r in results:
                 rel = r.get("relevant")
                 if not rel:
                     continue
-                keep = [i for i, ok in enumerate(rel) if ok]
+                keep = [i for i, flag in enumerate(rel) if flag is not False]
                 if len(keep) == len(rel):
-                    continue  # all relevant, nothing to drop
+                    continue  # nothing confirmed irrelevant, nothing to drop
                 r["chunks"] = [r["chunks"][i] for i in keep]
                 if r.get("seqs"):
                     r["seqs"] = [r["seqs"][i] for i in keep if i < len(r["seqs"])]
                 if r.get("scores"):
                     r["scores"] = [r["scores"][i] for i in keep if i < len(r["scores"])]
                 r["relevant"] = [rel[i] for i in keep]
+
+    # ── Neighbor stitching — over the surviving hits ────────────────────────
+    # Deterministic context expansion: stitch each surviving hit back to its
+    # contiguous seq-neighborhood so truncated structural blocks (TOC,
+    # reference lists) come back whole. Legacy tables (no seq) → no-op.
+    for r in results:
+        if r.get("error"):
+            continue
+        seqs = r.get("seqs") or []
+        if not (seqs and any(s is not None for s in seqs)):
+            continue
+        hit_relevant = r.get("relevant")  # aligned with current chunks/seqs
+        hit_flag_by_seq = (
+            {s: hit_relevant[i] for i, s in enumerate(seqs) if s is not None}
+            if hit_relevant
+            else None
+        )
+        expanded = await gather_neighbors(
+            r["collection"], seqs, db_path, **stitch_kwargs,
+        )
+        if expanded:
+            r["chunks"] = [e["text"] for e in expanded]
+            r["seqs"] = [e["seq"] for e in expanded]
+            if hit_flag_by_seq is not None:
+                # A stitched-in chunk that wasn't itself a hit was never
+                # individually assessed — None, not inherited from a hit
+                # elsewhere in the same merged window.
+                r["relevant"] = [hit_flag_by_seq.get(e["seq"]) for e in expanded]
 
     # Keep EVERY executed search, including empty ones: search_results is the
     # record the mechanical statistics are computed from (searched set, «+0

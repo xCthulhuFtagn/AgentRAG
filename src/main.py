@@ -13,6 +13,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.config import general_settings
 from src.state import make_initial_state
 from src.graph import build_graph
 from src.logging_setup import setup_logging
@@ -33,11 +34,7 @@ async def run_query(query: str, max_iterations: int = 3):
     log.info("query: %s (max_iterations=%d)", query, max_iterations)
 
     final_answer = None
-    async for event in graph.astream(
-        initial_state,
-        config={"configurable": {"thread_id": "cli-session"}},
-        stream_mode="updates",
-    ):
+    async for event in graph.astream(initial_state, stream_mode="updates"):
         for node_output in event.values():
             if isinstance(node_output, dict) and node_output.get("final_answer"):
                 final_answer = node_output["final_answer"]
@@ -63,8 +60,8 @@ def main():
     parser.add_argument(
         "--max-iterations",
         type=int,
-        default=3,
-        help="Maximum search iterations (default: 3)",
+        default=general_settings.max_iterations,
+        help=f"Maximum search iterations (default: {general_settings.max_iterations}, from MAX_ITERATIONS)",
     )
     args = parser.parse_args()
 

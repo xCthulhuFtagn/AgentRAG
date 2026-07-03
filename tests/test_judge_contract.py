@@ -28,6 +28,7 @@ from src.agents.common import (
     collection_search_stats,
     format_search_stats_for_judge,
     format_search_stats_for_planner,
+    render_search_context,
 )
 
 QUERY = "Как описан Пушкин в источниках?"
@@ -383,6 +384,83 @@ async def test_planner_probes_instead_of_initial_refusal(monkeypatch):
     assert all(s["subquery"] == "свиные крылья" for s in probed)
 
 
+# ── Probe backstop: rank by description similarity, not listing order ───────
+
+@pytest.mark.asyncio
+async def test_probe_ranks_collections_by_description_similarity(monkeypatch):
+    from src.agents import planner as pl
+
+    # 2D stand-ins so cosine similarity actually discriminates: direction, not
+    # magnitude, is what matters (a 1D scalar would always cosine to 1.0).
+    vectors = {
+        "расскажи про пушкина": [1.0, 0.0],
+        "поэзия и стихи": [0.95, 0.05],   # close to the query
+        "история рима": [0.3, 0.7],        # further
+        "клетки и ткани": [0.05, 0.95],    # furthest
+    }
+
+    async def fake_embed_batch(texts):
+        return [vectors[t] for t in texts]
+
+    monkeypatch.setattr(pl, "embed_batch", fake_embed_batch)
+
+    described = [
+        {"collection": "hist", "description": "история рима"},
+        {"collection": "lit", "description": "поэзия и стихи"},
+        {"collection": "bio", "description": "клетки и ткани"},
+    ]
+    ranked = await pl._rank_collections_for_probe(
+        "расскажи про пушкина", described, limit=2
+    )
+    assert ranked == ["lit", "hist"]  # closer descriptions rank first, capped
+
+
+@pytest.mark.asyncio
+async def test_probe_ranking_falls_back_on_embedding_failure(monkeypatch):
+    from src.agents import planner as pl
+
+    async def fail_embed_batch(texts):
+        raise RuntimeError("embedding model unavailable")
+
+    monkeypatch.setattr(pl, "embed_batch", fail_embed_batch)
+
+    described = [
+        {"collection": "a", "description": "x"},
+        {"collection": "b", "description": "y"},
+    ]
+    ranked = await pl._rank_collections_for_probe("q", described, limit=5)
+    assert ranked == ["a", "b"]  # original listing order preserved
+
+
+@pytest.mark.asyncio
+async def test_probe_ranking_empty_descriptions_use_original_order():
+    from src.agents import planner as pl
+
+    described = [
+        {"collection": "a", "description": ""},
+        {"collection": "b", "description": ""},
+    ]
+    ranked = await pl._rank_collections_for_probe("q", described, limit=5)
+    assert ranked == ["a", "b"]
+
+
+@pytest.mark.asyncio
+async def test_probe_ranking_puts_undescribed_collections_last(monkeypatch):
+    from src.agents import planner as pl
+
+    async def fake_embed_batch(texts):
+        return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(pl, "embed_batch", fake_embed_batch)
+
+    described = [
+        {"collection": "undescribed", "description": ""},
+        {"collection": "described", "description": "текст"},
+    ]
+    ranked = await pl._rank_collections_for_probe("q", described, limit=5)
+    assert ranked == ["described", "undescribed"]
+
+
 @pytest.mark.asyncio
 async def test_planner_iteration_exhaustion_gives_up(monkeypatch):
     # On iteration an empty plan is a legitimate, evidence-based exit.
@@ -397,7 +475,7 @@ async def test_planner_iteration_exhaustion_gives_up(monkeypatch):
     command = await pl.planner_node(state, config={})
 
     assert command.goto == "give_up"
-    assert "exhaustion" in command.update["sufficient_reason"]
+    assert "исчерпан" in command.update["sufficient_reason"]
 
 
 @pytest.mark.asyncio
@@ -409,7 +487,7 @@ async def test_planner_empty_corpus_gives_up(monkeypatch):
     command = await pl.planner_node(state, config={})
 
     assert command.goto == "give_up"
-    assert "no indexed collections" in command.update["sufficient_reason"]
+    assert "нет ни одной проиндексированной коллекции" in command.update["sufficient_reason"]
 
 
 # ── Give Up: collection names must survive markdown rendering ───────────────
@@ -480,6 +558,179 @@ async def test_search_fanout_records_empty_searches(monkeypatch):
             "scores": [],
         }
     ]
+
+
+# ── Reranking: a failed assessment is unknown, never "irrelevant" ───────────
+
+def test_topic_hits_excludes_failed_assessments():
+    from src.agents.common import _topic_hits_from_relevant
+
+    # seqs 1,2,3 are all NEW; flags aligned by index: True, None (the
+    # assessment call itself failed), False. A None must be excluded from
+    # BOTH the numerator and the denominator — counting it as a miss would let
+    # a transient API error dilute the topic-hit trend.
+    hits, evaluated = _topic_hits_from_relevant(
+        new_seq_set={1, 2, 3},
+        seqs=[1, 2, 3],
+        chunks=["a", "b", "c"],
+        relevant_flags=[True, None, False],
+    )
+    assert hits == 1
+    assert evaluated == 2
+
+    # No relevant_flags at all (reranking was disabled for that search).
+    assert _topic_hits_from_relevant({1}, [1], ["a"], None) == (None, None)
+    assert _topic_hits_from_relevant({1}, [1], ["a"], []) == (None, None)
+
+
+def test_stats_topic_trend_excludes_failed_assessments():
+    results = [
+        {
+            "collection": "lit",
+            "subquery": "q1",
+            "chunks": ["a", "b", "c"],
+            "seqs": [1, 2, 3],
+            "relevant": [True, None, False],
+        },
+    ]
+    stats = collection_search_stats(results)
+    # 3 new chunks, but only 2 were actually assessed (seq 2's call failed);
+    # of those 2, only 1 (seq 1) was flagged relevant.
+    assert stats["lit"]["new_topic_hits"] == [1]
+    assert stats["lit"]["new_counts"] == [2]
+
+
+@pytest.mark.asyncio
+async def test_search_fanout_reranks_hits_before_stitching(monkeypatch):
+    # Relevance is assessed on the raw KNN hits BEFORE stitching, and removal
+    # happens before gather_neighbors runs — so a chunk pulled in afterward as
+    # a stitched neighbor is never independently judged (or amputated).
+    from src.agents import search_fanout as sf
+    import src.agents.common as common_mod
+
+    async def fake_search(args: dict) -> dict:
+        # Two KNN hits: seq=5 (relevant) and seq=9 (confirmed irrelevant).
+        return {
+            "collection": args["collection"],
+            "query": args["query"],
+            "chunks": ["hit five", "hit nine"],
+            "scores": [0.1, 0.2],
+            "seqs": [5, 9],
+        }
+
+    async def fake_assess(chunks, query):
+        return [True, False]
+
+    async def fake_gather_neighbors(collection, hit_seqs, db_path, **kwargs):
+        # seq=9 must have been dropped by removal before stitching ran.
+        assert 9 not in hit_seqs
+        return [
+            {"seq": 5, "text": "hit five"},
+            {"seq": 6, "text": "neighbor six"},
+        ]
+
+    monkeypatch.setattr(sf, "vector_search", SimpleNamespace(ainvoke=fake_search))
+    monkeypatch.setattr(sf, "gather_neighbors", fake_gather_neighbors)
+    monkeypatch.setattr(common_mod, "assess_chunks_relevance", fake_assess)
+
+    state = make_initial_state(query="q")
+    state["search_tasks"] = [{"collection": "lit", "query": "q"}]
+    state["stitch_settings"] = {
+        "reranking_enabled": True,
+        "reranking_remove_irrelevant": True,
+    }
+
+    command = await sf.search_fanout_node(state, config={})
+    result = command.update["search_results"][0]
+
+    assert result["seqs"] == [5, 6]
+    assert result["chunks"] == ["hit five", "neighbor six"]
+    # seq=5 keeps its assessed flag; the stitched-in seq=6 neighbor was never
+    # itself assessed — None, not inherited from the nearby hit.
+    assert result["relevant"] == [True, None]
+
+
+@pytest.mark.asyncio
+async def test_search_fanout_keeps_unassessed_chunks(monkeypatch):
+    # A legacy (no-seq) table never stitches; removal must keep a None
+    # (assessment failed) chunk and drop only a confirmed False one — here
+    # nothing is False, so both chunks survive untouched.
+    from src.agents import search_fanout as sf
+    import src.agents.common as common_mod
+
+    async def fake_search(args: dict) -> dict:
+        return {
+            "collection": args["collection"],
+            "query": args["query"],
+            "chunks": ["a", "b"],
+            "scores": [0.1, 0.2],
+            "seqs": [None, None],
+        }
+
+    async def fake_assess(chunks, query):
+        return [None, True]
+
+    def fail_gather_neighbors(*a, **kw):
+        raise AssertionError("gather_neighbors must not run on a no-seq table")
+
+    monkeypatch.setattr(sf, "vector_search", SimpleNamespace(ainvoke=fake_search))
+    monkeypatch.setattr(sf, "gather_neighbors", fail_gather_neighbors)
+    monkeypatch.setattr(common_mod, "assess_chunks_relevance", fake_assess)
+
+    state = make_initial_state(query="q")
+    state["search_tasks"] = [{"collection": "old", "query": "q"}]
+    state["stitch_settings"] = {
+        "reranking_enabled": True,
+        "reranking_remove_irrelevant": True,
+    }
+
+    command = await sf.search_fanout_node(state, config={})
+    result = command.update["search_results"][0]
+
+    assert result["chunks"] == ["a", "b"]
+    assert result["relevant"] == [None, True]
+
+
+# ── render_search_context: dedup + grouping for judge/synthesis prompts ─────
+
+def test_render_search_context_dedups_by_seq_in_doc_order():
+    results = [
+        {"collection": "lit", "subquery": "запрос1", "chunks": ["a", "b"], "seqs": [1, 2]},
+        # A later iteration's search re-returns seq=2 (overlap) plus new seq=3.
+        {"collection": "lit", "subquery": "запрос2", "chunks": ["b", "c"], "seqs": [2, 3]},
+    ]
+    text = render_search_context(results)
+
+    assert text.count("[seq=2]") == 1  # deduped, not repeated per search
+    assert "[seq=1]" in text and "[seq=3]" in text
+    assert "запрос1" in text and "запрос2" in text  # both queries listed
+    assert text.index("[seq=1]") < text.index("[seq=2]") < text.index("[seq=3]")
+
+
+def test_render_search_context_groups_by_collection_and_backticks():
+    results = [
+        {"collection": "lit", "subquery": "q", "chunks": ["a"], "seqs": [1]},
+        {"collection": "bio", "subquery": "q2", "chunks": ["z"], "seqs": [5]},
+    ]
+    text = render_search_context(results, backtick_names=True)
+    assert "`lit`" in text
+    assert "`bio`" in text
+    assert "Коллекция: lit" not in text  # bare name must not also appear
+
+
+def test_render_search_context_legacy_dedups_by_text():
+    results = [
+        {"collection": "old", "subquery": "q1", "chunks": ["same text"], "seqs": []},
+        {"collection": "old", "subquery": "q2", "chunks": ["same text", "new text"], "seqs": []},
+    ]
+    text = render_search_context(results)
+    assert text.count("same text") == 1
+    assert "new text" in text
+
+
+def test_render_search_context_empty():
+    assert render_search_context([]) == ""
+    assert render_search_context([{"collection": "x", "chunks": []}]) == ""
 
 
 if __name__ == "__main__":

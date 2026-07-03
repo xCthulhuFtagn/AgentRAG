@@ -8,6 +8,7 @@ Run: python -m web.app
 """
 
 import html
+import uuid
 from pathlib import Path
 
 from nicegui import ui, events
@@ -470,6 +471,17 @@ def index():
                 value=current["bridge_gap"], min=0, max=20, step=1, precision=0,
             ).classes("w-full")
 
+            hybrid_search = ui.switch(
+                "Hybrid search (BM25 + vector, fused via RRF)",
+                value=current["hybrid_search_enabled"],
+            )
+            ui.label(
+                "Recovers exact terms, names and abbreviations that pure "
+                "vector similarity can miss. Needs a full-text index built at "
+                "index time — for a project indexed before this feature (or "
+                "with it previously off), run a full reindex to build it."
+            ).classes("text-xs text-gray-600")
+
             ui.label("Reranking").classes(
                 "text-xs font-medium text-green-700 mt-2"
             )
@@ -531,6 +543,7 @@ def index():
                     "max_iterations": int(max_iter.value or current["max_iterations"]),
                     "reranking_enabled": bool(reranking.value),
                     "reranking_remove_irrelevant": bool(remove_irrelevant.value),
+                    "hybrid_search_enabled": bool(hybrid_search.value),
                 }
 
             def apply():
@@ -545,7 +558,7 @@ def index():
                 vals = collect()
                 apply_btn.set_visibility(vals != current)
 
-            for el in (search_top_k, expand_padding, bridge_gap,
+            for el in (search_top_k, expand_padding, bridge_gap, hybrid_search,
                        max_iter, reranking, remove_irrelevant):
                 el.on_value_change(on_change)
 
@@ -665,36 +678,64 @@ def index():
 
     async def commit_edit():
         pid = ctx["edit"]["pid"]
-        # Build the final {name: bytes} set from the staged entries, plus the
-        # delta vs. disk — only changed files get (re)indexed, the rest keep
-        # their existing tables.
-        final: dict[str, bytes] = {}
-        added: list[str] = []    # new uploads, replacements, rename targets
-        removed: list[str] = []  # deletions, rename sources
+        # Compute the delta vs. disk and apply it directly via ProjectStore's
+        # per-file operations (delete/rename/add) — only the files actually
+        # changed are touched, unlike reading every untouched file into memory
+        # and rewriting the whole directory (the old replace_all_files: a
+        # failure partway through it lost every file, not just the changed
+        # ones).
+        added: list[str] = []              # new uploads, replacements, rename targets
+        removed: list[str] = []            # deletions, rename sources
+        deletions: list[str] = []          # orig_name to delete
+        renames: list[tuple[str, str]] = []    # (orig_name, new_name)
+        uploads: list[tuple[str, bytes]] = []  # (name, content)
+
+        final_names: set[str] = set()
         for s in ctx["edit"]["files"]:
             if s["deleted"]:
                 if s["origin"] == "disk":
+                    deletions.append(s["orig_name"])
                     removed.append(s["orig_name"])
                 continue
             name = s["name"]
-            if name in final:
+            if name in final_names:
                 ui.notify(f"Duplicate filename: {name}", color="negative")
                 return
+            final_names.add(name)
             if s["origin"] == "new":
-                final[name] = s["content"]
+                uploads.append((name, s["content"]))
                 added.append(name)
-            else:
-                final[name] = STORE.read_file(pid, s["orig_name"])
-                if name != s["orig_name"]:  # renamed → new table name
-                    removed.append(s["orig_name"])
-                    added.append(name)
+            elif name != s["orig_name"]:  # renamed → new table name
+                renames.append((s["orig_name"], name))
+                removed.append(s["orig_name"])
+                added.append(name)
+
         if not added and not removed:
             ctx["edit"] = None
             files_panel.refresh()
             ui.notify("No changes")
             return
+
         try:
-            STORE.replace_all_files(pid, final)
+            for orig_name in deletions:
+                STORE.delete_file(pid, orig_name)
+            # Renames go through a unique temporary name first: a direct
+            # old->new rename silently overwrites `new` on a plain filesystem
+            # rename, and `new` may itself be the source of ANOTHER rename in
+            # this same batch that hasn't run yet (e.g. x.txt->y.txt staged
+            # alongside y.txt->z.txt) — the temp hop makes the two-phase
+            # application order-independent. Keep the original suffix so
+            # rename_file's extension check (which only allows SUPPORTED_
+            # SUFFIXES) still passes on the intermediate name.
+            temp_targets: list[tuple[str, str]] = []
+            for orig_name, new_name in renames:
+                temp_name = f".__rename_tmp_{uuid.uuid4().hex}{Path(orig_name).suffix}"
+                STORE.rename_file(pid, orig_name, temp_name)
+                temp_targets.append((temp_name, new_name))
+            for temp_name, new_name in temp_targets:
+                STORE.rename_file(pid, temp_name, new_name)
+            for name, content in uploads:
+                STORE.add_file(pid, name, content)
         except (ValueError, OSError) as ex:
             ui.notify(str(ex), color="negative")
             return

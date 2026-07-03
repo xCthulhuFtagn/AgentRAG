@@ -174,10 +174,11 @@ def resolve_index_settings(overrides: dict | None = None) -> dict:
     fetched per search before stitching), the two neighbor-stitching ones
     (`expand_padding`, `bridge_gap` — threaded into `gather_neighbors` via
     graph state), `reranking_enabled` / `reranking_remove_irrelevant` (LLM
-    per-chunk relevance assessment in search_fanout) and `max_iterations`
-    (iteration budget for the planner→judge loop). Any key absent or None falls
-    back to the global `vdb_settings` (.env) value — so the .env values are the
-    defaults.
+    per-chunk relevance assessment in search_fanout), `hybrid_search_enabled`
+    (BM25 fusion in vector_search — the underlying FTS index is built at index
+    time regardless, see index_files) and `max_iterations` (iteration budget
+    for the planner→judge loop). Any key absent or None falls back to the
+    global `vdb_settings` (.env) value — so the .env values are the defaults.
     """
     resolved = {
         "chunk_size": vdb_settings.chunk_size,
@@ -189,6 +190,7 @@ def resolve_index_settings(overrides: dict | None = None) -> dict:
         "bridge_gap": vdb_settings.bridge_gap,
         "reranking_enabled": vdb_settings.reranking_enabled,
         "reranking_remove_irrelevant": vdb_settings.reranking_remove_irrelevant,
+        "hybrid_search_enabled": vdb_settings.hybrid_search_enabled,
         "max_iterations": vdb_settings.max_iterations,
     }
     for key, value in (overrides or {}).items():
@@ -261,6 +263,11 @@ async def index_files(
                 used.discard(old)
                 descriptions.pop(old, None)
 
+    # Table names are assigned sequentially first: the collision-disambiguation
+    # check depends on the `used` set built up incrementally over this run, so
+    # it can't be parallelized. Only the actually expensive per-file work below
+    # (extraction, embedding, description, table write) runs concurrently.
+    assignments: list[tuple[Path, str]] = []
     for file_path in files:
         base = safe_table_name(file_path.stem)
         table_name = base
@@ -269,63 +276,119 @@ async def index_files(
             digest = hashlib.md5(file_path.name.encode("utf-8")).hexdigest()[:6]
             table_name = f"{base}_{digest}"
         used.add(table_name)
-        print(f"  Indexing: {file_path.name} → table '{table_name}'")
+        assignments.append((file_path, table_name))
 
-        # Text extraction (LiteParse/OCR) and chunking are CPU-heavy and fully
-        # synchronous — run them off the event loop so the caller's UI stays
-        # responsive (the web reindex awaits this on the same loop as NiceGUI).
-        try:
-            text = await asyncio.to_thread(extract_text, file_path)
-        except Exception as e:
-            print(f"    Error extracting text: {e}")
-            if progress_cb:
-                progress_cb(file_path.name, False)  # failed → flagged in UI
-            continue
+    semaphore = asyncio.Semaphore(vdb_settings.index_concurrency)
 
-        if not text.strip():
-            print(f"    Warning: no text extracted")
-            if progress_cb:
-                progress_cb(file_path.name, False)
-            continue
+    async def _bounded(file_path: Path, table_name: str):
+        async with semaphore:
+            return await _index_one_file(file_path, table_name, db_path, cfg, progress_cb)
 
-        chunks = await asyncio.to_thread(
-            split_text, text, cfg["chunk_size"], cfg["chunk_overlap"]
-        )
-        print(f"    {len(chunks)} chunks, embedding...")
-
-        # Embedding and the (optional) LLM description are independent given the
-        # text — run them concurrently so the description adds little wall-clock.
-        if cfg["descriptions_enabled"]:
-            embeddings, description = await asyncio.gather(
-                embed_batch(chunks),
-                describe_document(text, cfg["describe_max_chars"]),
-            )
-        else:
-            embeddings = await embed_batch(chunks)
-            description = ""
-
-        # seq = chunk's position in the document — lets the retriever stitch
-        # back contiguous neighborhoods (see gather_neighbors in tools.py).
-        records = [
-            {"text": chunk, "vector": emb, "seq": i}
-            for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
-        ]
-
-        # Sync LanceDB disk writes — also off-loop.
-        try:
-            await asyncio.to_thread(db.drop_table, table_name, ignore_missing=True)
-        except Exception:
-            pass
-
-        await asyncio.to_thread(db.create_table, table_name, data=records)
-        descriptions[table_name] = {"file": file_path.name, "description": description}
-        print(f"    Done — {len(records)} vectors stored")
-        if progress_cb:
-            progress_cb(file_path.name, True)
+    results = await asyncio.gather(*[_bounded(fp, tn) for fp, tn in assignments])
+    for table_name, entry in results:
+        if entry is not None:
+            descriptions[table_name] = entry
 
     # Persist per-file descriptions next to the DB for the Planner to read.
     save_descriptions(db_path, descriptions)
     print(f"\nIndexing complete. DB at: {db_path}")
+
+
+async def _index_one_file(
+    file_path: Path,
+    table_name: str,
+    db_path: str,
+    cfg: dict,
+    progress_cb: Callable[[str, bool], None] | None,
+) -> tuple[str, dict | None]:
+    """Extract, chunk, embed and store one file into its own table.
+
+    Runs concurrently with other files (bounded by index_concurrency, see
+    index_files) — opens its OWN sync LanceDB connection rather than sharing
+    the caller's, since get_sync_db is a cheap handle (not cached) and several
+    of these connections may be doing disk writes to DIFFERENT tables at once
+    from different threads (asyncio.to_thread).
+
+    Returns (table_name, description_entry); description_entry is None when
+    the file was skipped (extraction failed / no text extracted) — the caller
+    then records no sidecar entry for it.
+    """
+    print(f"  Indexing: {file_path.name} → table '{table_name}'")
+
+    # Text extraction (LiteParse/OCR) and chunking are CPU-heavy and fully
+    # synchronous — run them off the event loop so the caller's UI stays
+    # responsive (the web reindex awaits this on the same loop as NiceGUI).
+    try:
+        text = await asyncio.to_thread(extract_text, file_path)
+    except Exception as e:
+        print(f"    Error extracting text ({file_path.name}): {e}")
+        if progress_cb:
+            progress_cb(file_path.name, False)  # failed → flagged in UI
+        return table_name, None
+
+    if not text.strip():
+        print(f"    Warning: no text extracted ({file_path.name})")
+        if progress_cb:
+            progress_cb(file_path.name, False)
+        return table_name, None
+
+    chunks = await asyncio.to_thread(
+        split_text, text, cfg["chunk_size"], cfg["chunk_overlap"]
+    )
+    print(f"    {file_path.name}: {len(chunks)} chunks, embedding...")
+
+    # Embedding and the (optional) LLM description are independent given the
+    # text — run them concurrently so the description adds little wall-clock.
+    if cfg["descriptions_enabled"]:
+        embeddings, description = await asyncio.gather(
+            embed_batch(chunks),
+            describe_document(text, cfg["describe_max_chars"]),
+        )
+    else:
+        embeddings = await embed_batch(chunks)
+        description = ""
+
+    # seq = chunk's position in the document — lets the retriever stitch
+    # back contiguous neighborhoods (see gather_neighbors in tools.py).
+    records = [
+        {"text": chunk, "vector": emb, "seq": i}
+        for i, (chunk, emb) in enumerate(zip(chunks, embeddings))
+    ]
+
+    db = get_sync_db(db_path)
+
+    # Sync LanceDB disk writes — also off-loop.
+    try:
+        await asyncio.to_thread(db.drop_table, table_name, ignore_missing=True)
+    except Exception:
+        pass
+
+    table = await asyncio.to_thread(db.create_table, table_name, data=records)
+
+    # Build a native full-text index alongside the vector one, so hybrid
+    # search (BM25 + vector, see tools.py) has something to query — cheap, no
+    # LLM involved. Built unconditionally regardless of the project's current
+    # hybrid_search_enabled toggle, since the toggle only gates whether search
+    # USES it; a later "turn hybrid on" then needs no reindex. A failure here
+    # must not break indexing (legacy behavior: plain vector search still
+    # works without an FTS index).
+    try:
+        await asyncio.to_thread(
+            table.create_fts_index,
+            "text",
+            use_tantivy=False,
+            language="Russian",
+            stem=True,
+            remove_stop_words=True,
+            replace=True,
+        )
+    except Exception as e:
+        print(f"    Warning: could not build full-text index ({file_path.name}): {e}")
+
+    print(f"    Done — {len(records)} vectors stored ({file_path.name})")
+    if progress_cb:
+        progress_cb(file_path.name, True)
+    return table_name, {"file": file_path.name, "description": description}
 
 
 async def remove_files_from_index(

@@ -119,6 +119,68 @@ async def get_inventory_str(db_path: str | None, *, backtick_names: bool = False
     return format_inventory(described, backtick_names=backtick_names)
 
 
+def render_search_context(
+    search_results: list[dict], *, backtick_names: bool = False
+) -> str:
+    """Render accumulated search_results as prompt context — deduped, grouped.
+
+    Both the judge and Synthesis used to render one block per EXECUTED SEARCH,
+    so a chunk re-fetched by a later iteration's rewritten query (a near-repeat
+    of an earlier one, or one that overlaps via neighbor stitching) appeared in
+    the prompt once per search that returned it — wasted tokens that grow with
+    every iteration. Here chunks are grouped by collection and deduplicated by
+    seq (legacy tables without seq dedupe by exact text), sorted into document
+    order, with the collection's executed queries listed once above its chunks.
+
+    backtick_names wraps each collection name in `…` for Synthesis, whose
+    output the web UI renders as markdown (see format_inventory).
+    """
+    chunked = [r for r in search_results if r.get("chunks")]
+    if not chunked:
+        return ""
+
+    groups: dict[str, dict] = {}
+    for r in chunked:
+        collection = r.get("collection") or "?"
+        g = groups.setdefault(
+            collection,
+            {"queries": [], "seen_seq": set(), "seen_text": set(), "items": []},
+        )
+        query = (r.get("subquery") or "").strip()
+        if query and query not in g["queries"]:
+            g["queries"].append(query)
+        chunks = r.get("chunks", [])
+        seqs = r.get("seqs") or []
+        for i, chunk in enumerate(chunks):
+            seq = seqs[i] if i < len(seqs) else None
+            if seq is not None:
+                if seq in g["seen_seq"]:
+                    continue
+                g["seen_seq"].add(seq)
+            else:
+                if chunk in g["seen_text"]:
+                    continue
+                g["seen_text"].add(chunk)
+            g["items"].append((seq, chunk))
+
+    blocks = []
+    for collection, g in groups.items():
+        name = f"`{collection}`" if backtick_names else collection
+        # seq-known chunks in document order; seq-unknown (legacy) chunks
+        # follow in first-seen order.
+        known = sorted((it for it in g["items"] if it[0] is not None), key=lambda it: it[0])
+        unknown = [it for it in g["items"] if it[0] is None]
+        chunks_str = "\n---\n".join(
+            f"[seq={seq}] {text}" if seq is not None else text
+            for seq, text in known + unknown
+        )
+        queries_str = "; ".join(f"«{q}»" for q in g["queries"]) or "(без запроса)"
+        blocks.append(
+            f"\n### Коллекция: {name}\nЗапросы: {queries_str}\n{chunks_str}\n"
+        )
+    return "\n".join(blocks)
+
+
 # ── Mechanical search statistics ─────────────────────────────────────────────
 # Everything below is computed by code from the accumulated search_results —
 # the model only reads it. A weak model cannot reliably reconstruct "what has
@@ -132,22 +194,31 @@ async def get_inventory_str(db_path: str | None, *, backtick_names: bool = False
 # "insufficient", vector search retrieves what's relevant, not everything).
 
 def _topic_hits_from_relevant(new_seq_set, seqs, chunks, relevant_flags):
-    """Count how many NEW chunks the LLM marked as relevant to the query.
+    """Count NEW chunks the LLM marked relevant, out of NEW chunks it could assess.
 
-    *relevant_flags* is a list of bools aligned with *chunks*/*seqs* by index,
-    produced by `assess_chunks_relevance`.  A chunk counts as a topic hit when
-    its seq is in *new_seq_set* AND its corresponding flag is ``True``.
-    Returns ``None`` when *relevant_flags* is absent (reranking was disabled
-    for that search) — the trend display then falls back to the raw ``+N``.
+    *relevant_flags* is a list of bool|None aligned with *chunks*/*seqs* by
+    index, produced by `assess_chunks_relevance` (None = the assessment call
+    itself failed — unknown, not "irrelevant"). Returns (hits, evaluated):
+    hits = new chunks flagged True; evaluated = new chunks whose flag is not
+    None. A chunk the LLM couldn't assess is excluded from both, so a
+    transient API error doesn't dilute the topic-hit trend with a false miss.
+    Returns (None, None) when *relevant_flags* is absent entirely (reranking
+    was disabled for that search) — the trend display then falls back to the
+    raw ``+N``.
     """
     if not relevant_flags:
-        return None
+        return None, None
     hits = 0
+    evaluated = 0
     for i, s in enumerate(seqs):
         if s is not None and s in new_seq_set and i < len(relevant_flags):
-            if relevant_flags[i]:
+            flag = relevant_flags[i]
+            if flag is None:
+                continue
+            evaluated += 1
+            if flag:
                 hits += 1
-    return hits
+    return hits, evaluated
 
 
 # ── LLM per-chunk relevance assessment ─────────────────────────────────────
@@ -177,24 +248,31 @@ _CHUNK_RELEVANCE_PROMPT = """Оцени, содержит ли фрагмент 
 {chunk}"""
 
 
-async def _assess_one(chunk: str, query: str, llm) -> bool:
-    """Assess a single chunk → bool.  Failure → False (conservative)."""
+async def _assess_one(chunk: str, query: str, llm) -> bool | None:
+    """Assess a single chunk → bool, or None if the assessment itself failed.
+
+    None (not False) on failure: a transport error or empty tool call means we
+    never actually judged the chunk, so it must not be treated as "found
+    irrelevant" — that would let a transient API hiccup silently drop good
+    context when reranking_remove_irrelevant is on.
+    """
     try:
         prompt = _CHUNK_RELEVANCE_PROMPT.format(query=query, chunk=chunk)
         result = await ainvoke_with_retry(llm, prompt)
-        return bool(result.relevant) if result else False
+        return bool(result.relevant) if result else None
     except Exception:
-        return False
+        return None
 
 
 async def assess_chunks_relevance(
     chunks: list[str], query: str
-) -> list[bool]:
+) -> list[bool | None]:
     """Assess each chunk's relevance to *query* via parallel LLM calls.
 
     One structured-LLM instance is shared across chunks (cached by schema type).
     Each call uses `ainvoke_with_retry` (tenacity) — transient transport errors
-    retry; on any final failure the chunk is conservatively marked not relevant.
+    retry; on any final failure the chunk's assessment is None (unknown), never
+    False (which downstream code would read as "confirmed irrelevant").
     All chunks are assessed concurrently via `asyncio.gather`.
     """
     if not chunks:
@@ -257,18 +335,18 @@ def collection_search_stats(
         st["last_new"] = len(new)
         st["retrieved"] |= new
 
-        # Per-search topic-hit trend: of the chunks NEW in this search, how
-        # many did the LLM assess as relevant?  A falling trend means the
-        # collection is scraping increasingly off-topic parts of the document
-        # — exhaustion the raw +N cannot see.  No "relevant" field → reranking
-        # was disabled → skip (the display falls back to raw +N).
+        # Per-search topic-hit trend: of the NEW chunks the LLM could actually
+        # assess, how many were relevant?  A falling trend means the collection
+        # is scraping increasingly off-topic parts of the document — exhaustion
+        # the raw +N cannot see.  No "relevant" field → reranking was disabled
+        # → skip (the display falls back to raw +N).
         seq_list = [s for s in (r.get("seqs") or []) if s is not None]
-        th = _topic_hits_from_relevant(
+        th, evaluated = _topic_hits_from_relevant(
             new, seq_list, chunks, r.get("relevant")
         )
         if th is not None:
             st["new_topic_hits"].append(th)
-            st["new_counts"].append(len(new))
+            st["new_counts"].append(evaluated)
     return stats
 
 

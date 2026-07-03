@@ -45,6 +45,7 @@ from src.agents.common import (
     format_inventory,
     format_search_stats_for_judge,
     generate_structured,
+    render_search_context,
 )
 from src.vectordb.tools import list_collections_described
 
@@ -112,29 +113,13 @@ async def sufficient_context_node(
     max_iter = state.get("max_iterations", general_settings.max_iterations)
     iteration = state.get("iteration_count", 0)
 
-    # Format search results. search_results records every executed search,
-    # including empty ones (the statistics need them); only entries that
-    # actually brought chunks are worth showing as context.
+    # Render search results: grouped by collection, deduped by seq — a chunk
+    # re-fetched by a later iteration's search is shown once, not once per
+    # search that returned it (search_results records every executed search,
+    # including empty ones, for the statistics below; only chunked entries are
+    # worth showing as context).
     search_results = state.get("search_results", [])
-    chunked = [r for r in search_results if r.get("chunks")]
-    results_str = ""
-    for i, r in enumerate(chunked[-10:]):
-        chunks = r.get("chunks", [])
-        seqs = r.get("seqs", []) or []
-        # Tag each chunk with its document position so the judge can see
-        # contiguity and gaps (chunks arrive seq-ordered after stitching).
-        lines = []
-        for j, chunk in enumerate(chunks):
-            seq = seqs[j] if j < len(seqs) and seqs[j] is not None else "?"
-            lines.append(f"[seq={seq}] {chunk}")
-        chunks_str = "\n---\n".join(lines)
-        results_str += (
-            f"\n[Результат {i+1}] Коллекция: {r.get('collection')}, "
-            f"Запрос: {r.get('subquery')}\n{chunks_str}\n"
-        )
-
-    if not results_str:
-        results_str = "(результатов поиска пока нет)"
+    results_str = render_search_context(search_results) or "(результатов поиска пока нет)"
 
     described = await list_collections_described(state.get("db_path"))
     inventory = format_inventory(described)

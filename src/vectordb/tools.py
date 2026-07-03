@@ -11,24 +11,65 @@ from src.vectordb.client import get_async_db
 from src.vectordb.descriptions import load_descriptions
 
 
+def _rrf_merge(
+    vec_results: list[dict], fts_results: list[dict], top_k: int, k: int = 60
+) -> list[dict]:
+    """Reciprocal Rank Fusion of a vector-KNN and a full-text ranked list.
+
+    Vector similarity misses exact terms, names and abbreviations — precisely
+    what a rephrased query is trying to recover; BM25-style full-text search
+    misses paraphrases and synonyms. RRF combines the two RANKINGS (score =
+    sum of 1/(k + rank)) rather than comparing their raw scores, which live on
+    incomparable scales (L2 distance vs. a BM25-like relevance score). k=60 is
+    the standard damping constant so no single top rank dominates the fusion.
+
+    Dedup key: `seq` when present (both lists come from the same table, so seq
+    is a stable row identity), else the chunk's text (legacy tables without
+    seq). When a row appears in both lists, the vector-side row is kept (it
+    carries `_distance`, used for display/removal bookkeeping downstream).
+    """
+    def key(r):
+        seq = r.get("seq")
+        return ("seq", seq) if seq is not None else ("text", r.get("text", ""))
+
+    scores: dict = {}
+    rows: dict = {}
+    for source in (vec_results, fts_results):
+        for rank, r in enumerate(source):
+            k_ = key(r)
+            scores[k_] = scores.get(k_, 0.0) + 1.0 / (k + rank + 1)
+            rows.setdefault(k_, r)
+
+    ordered = sorted(scores, key=lambda k_: scores[k_], reverse=True)
+    return [rows[k_] for k_ in ordered[:top_k]]
+
+
 @tool
 async def vector_search(
     query: str,
     collection: str,
     top_k: int = vdb_settings.search_top_k,
     db_path: str | None = None,
+    hybrid: bool = False,
 ) -> dict:
-    """Search a LanceDB collection by vector similarity.
+    """Search a LanceDB collection by vector similarity (optionally hybrid).
 
     Use this tool to find relevant text chunks from a specific document collection.
     Choose the right collection based on the Planner's route.
 
     Args:
-        query: The search query text (will be embedded).
+        query: The search query text (will be embedded, and used verbatim for
+            full-text search when hybrid=True).
         collection: Name of the LanceDB table/collection to search.
         top_k: Number of top results to return (default 5).
         db_path: Optional LanceDB path to scope the search (per-project isolation).
             None → global LANCE_DB_PATH.
+        hybrid: When True, fuse the vector KNN results with a full-text search
+            over the same query (Reciprocal Rank Fusion) — recovers exact-term
+            matches (names, abbreviations) that pure embedding similarity can
+            miss. Silently falls back to vector-only if the table has no
+            full-text index (legacy tables indexed before this feature, or a
+            failed index build).
 
     Returns:
         Dict with keys: collection, query, chunks (list of text), scores (list of distances).
@@ -49,6 +90,22 @@ async def vector_search(
     # Async LanceDB: search() is a coroutine — await it before chaining.
     search_query = await table.search(query_embedding)
     results = await search_query.limit(top_k).to_list()
+
+    if hybrid:
+        try:
+            fts_results = (
+                await table.query()
+                .nearest_to_text(query)
+                .select(["text", "seq", "_score"])
+                .limit(top_k)
+                .to_list()
+            )
+        except Exception:
+            # No FTS index on this table (legacy, or the index build failed
+            # at index time) — fall back to vector-only, same as hybrid=False.
+            fts_results = []
+        if fts_results:
+            results = _rrf_merge(results, fts_results, top_k)
 
     return {
         "collection": collection,

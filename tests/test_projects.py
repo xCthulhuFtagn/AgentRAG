@@ -67,3 +67,31 @@ def test_isolation_separate_db_paths(store):
     b = store.create("B")["id"]
     assert store.db_path(a) != store.db_path(b)
     assert a in store.db_path(a)
+
+
+def test_rename_chain_via_temp_name_avoids_clobbering(store):
+    # commit_edit (web/app.py) applies a batch of staged renames via a
+    # two-phase temp-name hop rather than one straight old->new rename,
+    # because a direct rename can silently overwrite another file in the SAME
+    # batch that hasn't been moved out of the way yet — e.g. x.txt->y.txt
+    # staged alongside y.txt->z.txt. This test pins that the technique (using
+    # only ProjectStore.rename_file) is actually safe against that chain.
+    import uuid
+
+    pid = store.create("Chain")["id"]
+    store.add_file(pid, "x.txt", b"X-CONTENT")
+    store.add_file(pid, "y.txt", b"Y-CONTENT")
+
+    renames = [("x.txt", "y.txt"), ("y.txt", "z.txt")]
+    temp_targets = []
+    for orig_name, new_name in renames:
+        temp_name = f".__rename_tmp_{uuid.uuid4().hex}.txt"
+        store.rename_file(pid, orig_name, temp_name)
+        temp_targets.append((temp_name, new_name))
+    for temp_name, new_name in temp_targets:
+        store.rename_file(pid, temp_name, new_name)
+
+    names = {f["name"] for f in store.list_files(pid)}
+    assert names == {"y.txt", "z.txt"}
+    assert (store.files_dir(pid) / "y.txt").read_bytes() == b"X-CONTENT"
+    assert (store.files_dir(pid) / "z.txt").read_bytes() == b"Y-CONTENT"
