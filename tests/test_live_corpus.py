@@ -1,4 +1,4 @@
-"""Live end-to-end tests against the real indexed corpus + real DeepSeek.
+"""Live end-to-end tests against the real indexed corpus + the real LLM provider.
 
 These run the UNCHANGED graph (build_graph → ainvoke) over the actual project
 corpus on disk — four Soviet-era school textbooks indexed under a web project
@@ -31,7 +31,8 @@ absent topics → honest refusal. Residual character-level OCR noise remains, bu
 the synthesised answer (clean Russian generated from the chunks) is asserted, so
 content checks use stems robust to it.
 
-Doubly gated (skips unless both hold): DEEPSEEK_API_KEY present (read via
+Doubly gated (skips unless both hold): the active provider's key present
+(DEEPSEEK_API_KEY or GIGACHAT_CREDENTIALS, per LLM_PROVIDER, read via
 general_settings → .env) AND the textbook corpus discoverable under data/lancedb/.
 """
 
@@ -75,10 +76,17 @@ def _find_corpus_db() -> tuple[str, list[str]] | None:
 
 _CORPUS = _find_corpus_db()
 
+_active_provider_key = (
+    general_settings.gigachat_credentials
+    if general_settings.llm_provider == "gigachat"
+    else general_settings.deepseek_api_key
+)
+
 requires_live_corpus = pytest.mark.skipif(
-    not general_settings.deepseek_api_key or _CORPUS is None,
+    not _active_provider_key or _CORPUS is None,
     reason=(
-        "live corpus test needs DEEPSEEK_API_KEY (.env) and the indexed "
+        "live corpus test needs the active provider's API key (DEEPSEEK_API_KEY "
+        "or GIGACHAT_CREDENTIALS, per LLM_PROVIDER in .env) and the indexed "
         "textbook corpus under data/lancedb/"
     ),
 )

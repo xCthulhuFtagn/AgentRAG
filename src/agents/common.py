@@ -6,8 +6,12 @@ import logging
 from contextvars import ContextVar
 from functools import lru_cache
 
+import httpx
+from gigachat.exceptions import GigaChatException as _GigaChatException
 from langchain_core.callbacks import AsyncCallbackHandler
+from openai import APIError as _OpenAIAPIError
 from pydantic import BaseModel, Field
+from langchain_gigachat.chat_models import GigaChat
 from langchain_openai import ChatOpenAI
 from langgraph.types import Command
 
@@ -28,14 +32,16 @@ class StructuredGenerationError(RuntimeError):
     """The LLM could not produce a usable structured result after all retries."""
 
 
-# Transport/API errors from the OpenAI-compatible client count as LLM failures
-# too (rate limits, 5xx, connection drops). Imported defensively so a missing
-# openai package never breaks startup.
-try:  # pragma: no cover - import guard
-    from openai import APIError as _OpenAIAPIError
-    _LLM_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (_OpenAIAPIError,)
-except Exception:  # pragma: no cover
-    _LLM_TRANSPORT_ERRORS = ()
+# Transport/API errors from either provider's client count as LLM failures too
+# (rate limits, 5xx, connection drops, auth/token-refresh failures). Both
+# providers are always-on dependencies (the toggle picks which one get_llm()
+# builds, not which one is installed), so both error sets are checked
+# unconditionally regardless of the active `llm_provider`.
+_LLM_TRANSPORT_ERRORS: tuple[type[BaseException], ...] = (
+    _OpenAIAPIError,
+    _GigaChatException,
+    httpx.HTTPError,
+)
 
 # What llm_failsafe treats as "the model failed" → give_up (not a code bug).
 LLM_FAILURE_ERRORS: tuple[type[BaseException], ...] = (
@@ -506,11 +512,28 @@ def llm_failsafe(node_name: str):
 
 
 @lru_cache(maxsize=4)
-def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI:
-    """Get a configured DeepSeek LLM instance (cached).
+def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI | GigaChat:
+    """Get a configured LLM instance for the active provider (cached).
 
-    Uses OpenAI-compatible endpoint at api.deepseek.com/v1.
+    `general_settings.llm_provider` ("deepseek" default, or "gigachat") is the
+    single switch — both stacks stay preconfigured in .env at all times, so no
+    branch/deployment split is needed to change providers.
+
+    GigaChat's API rejects temperature=0 (allowed range is (0, 2]); the
+    documented way to get deterministic output is top_p=0, so a non-positive
+    `temperature` is translated to that instead of being sent as-is.
     """
+    if general_settings.llm_provider == "gigachat":
+        sampling = {"temperature": temperature} if temperature > 0 else {"top_p": 0.0}
+        return GigaChat(
+            model=model or general_settings.gigachat_model,
+            credentials=general_settings.gigachat_credentials,
+            scope=general_settings.gigachat_scope,
+            base_url=general_settings.gigachat_base_url,
+            verify_ssl_certs=general_settings.gigachat_verify_ssl_certs,
+            callbacks=[_token_handler],
+            **sampling,
+        )
     return ChatOpenAI(
         model=model or general_settings.deepseek_model,
         api_key=general_settings.deepseek_api_key,
@@ -523,10 +546,12 @@ def get_llm(temperature: float = 0.0, model: str | None = None) -> ChatOpenAI:
 def get_structured_llm(schema, temperature: float = 0.0):
     """LLM that returns a validated Pydantic object.
 
-    Uses method="function_calling" — DeepSeek's API does not support the
-    json_schema `response_format` that with_structured_output() picks by
-    default (returns 'This response_format type is unavailable now').
-    Function calling is the OpenAI-compatible path DeepSeek does support.
+    Uses method="function_calling" for both providers: DeepSeek's API does not
+    support the json_schema `response_format` that with_structured_output()
+    picks by default (returns 'This response_format type is unavailable
+    now'), and GigaChat's own function-calling path is what langchain-gigachat
+    exposes. Kept explicit so every structured node goes through the same
+    mechanism regardless of the active provider or library defaults.
     """
     return get_llm(temperature).with_structured_output(
         schema, method="function_calling"

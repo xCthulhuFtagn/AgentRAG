@@ -64,7 +64,7 @@ is searched to exhaustion.
 
 | Component | Choice | Why |
 |-----------|--------|-----|
-| LLM | DeepSeek (`deepseek-chat`) | OpenAI-compatible API; structured output via function calling |
+| LLM | DeepSeek (`deepseek-chat`) or GigaChat (`GigaChat-2-Pro`) | `LLM_PROVIDER` switch (`.env`); both APIs support structured output via function calling |
 | Orchestration | LangGraph | Command-driven edgeless graph |
 | Vector DB | LanceDB | Serverless, async, columnar files; per-project isolation |
 | Embeddings | FastEmbed (`paraphrase-multilingual-MiniLM-L12-v2`) | ONNX, no PyTorch, multilingual (incl. Russian), air-gapped friendly |
@@ -78,7 +78,7 @@ is searched to exhaustion.
 # Install
 pip install -r requirements.txt
 
-# Configure (only DEEPSEEK_API_KEY is required; see Configuration)
+# Configure (only the active provider's key is required — DEEPSEEK_API_KEY by default; see Configuration)
 cp .env.example .env && $EDITOR .env
 
 # ── Web UI (projects + chat) ──
@@ -202,20 +202,32 @@ Everything lives under `data/` (created automatically). The CLI's global DB is j
 
 ## Configuration
 
-All settings are **pydantic-settings** classes — typed, validated, loaded from `.env` (or the process environment). Env var names are the UPPERCASE field names. Every value has a default, so **only `DEEPSEEK_API_KEY` is strictly required**; bad values are rejected at startup (e.g. `SEARCH_TOP_K=0` fails the `≥1` check).
+All settings are **pydantic-settings** classes — typed, validated, loaded from `.env` (or the process environment). Env var names are the UPPERCASE field names. Every value has a default, so **only the active provider's key is strictly required** (`DEEPSEEK_API_KEY`, or `GIGACHAT_CREDENTIALS` when `LLM_PROVIDER=gigachat`); bad values are rejected at startup (e.g. `SEARCH_TOP_K=0` fails the `≥1` check).
 
 There are two scopes:
 
-- **`general_settings`** ([src/config.py](src/config.py)) — DeepSeek API + the agent loop.
+- **`general_settings`** ([src/config.py](src/config.py)) — LLM provider (DeepSeek/GigaChat) + the agent loop.
 - **`vdb_settings`** ([src/vectordb/config.py](src/vectordb/config.py)) — the vectordb package owns its own knobs (path, embeddings, chunking, search, stitching).
 
 ```ini
+# ── LLM provider switch (general_settings) ──
+LLM_PROVIDER=deepseek                        # deepseek / gigachat — both stacks below stay configured; this picks which one runs
+
 # ── DeepSeek API (general_settings) ──
-DEEPSEEK_API_KEY=sk-...                      # required
+DEEPSEEK_API_KEY=sk-...                      # required if LLM_PROVIDER=deepseek
 DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
 DEEPSEEK_MODEL=deepseek-chat
 DEEPSEEK_CONNECTION_RETRIES=3                # tenacity retries on 429/5xx/connection drops (0 disables)
 DEEPSEEK_RETRY_BACKOFF_FACTOR=1.0            # initial backoff seconds, doubles per retry; 429 Retry-After honored
+
+# ── GigaChat API (general_settings) ──
+GIGACHAT_CREDENTIALS=...                     # required if LLM_PROVIDER=gigachat; base64 key from developers.sber.ru
+GIGACHAT_SCOPE=GIGACHAT_API_PERS             # GIGACHAT_API_PERS / GIGACHAT_API_B2B / GIGACHAT_API_CORP
+GIGACHAT_MODEL=GigaChat-2-Pro
+GIGACHAT_BASE_URL=https://gigachat.devices.sberbank.ru/api/v1
+GIGACHAT_VERIFY_SSL_CERTS=false              # API certs are from the RU Ministry CA; install it and set true to verify
+GIGACHAT_CONNECTION_RETRIES=3                # tenacity retries on 429/5xx/connection drops (0 disables)
+GIGACHAT_RETRY_BACKOFF_FACTOR=1.0            # initial backoff seconds, doubles per retry; 429 Retry-After honored
 
 # ── Agent loop (general_settings) ──
 MAX_ITERATIONS=3                             # max search→check retries before give_up

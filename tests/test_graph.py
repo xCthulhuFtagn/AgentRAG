@@ -1,6 +1,5 @@
 """Tests for the Agentic RAG LangGraph pipeline."""
 
-import os
 from pathlib import Path
 import sys
 
@@ -8,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from src.config import general_settings
 from src.state import (
     make_initial_state,
     AgentRAGState,
@@ -17,10 +17,18 @@ from src.state import (
 )
 from src.graph import build_graph
 
-# The live smoke test needs a real DeepSeek key (it calls the API).
+# The live smoke test needs a real key for the active provider (it calls the API).
+_active_provider_key = (
+    general_settings.gigachat_credentials
+    if general_settings.llm_provider == "gigachat"
+    else general_settings.deepseek_api_key
+)
 requires_api_key = pytest.mark.skipif(
-    not os.getenv("DEEPSEEK_API_KEY"),
-    reason="DEEPSEEK_API_KEY not set — skipping live graph smoke test",
+    not _active_provider_key,
+    reason=(
+        "no API key for the active provider — set DEEPSEEK_API_KEY or "
+        "GIGACHAT_CREDENTIALS (per LLM_PROVIDER) to run the live graph smoke test"
+    ),
 )
 
 
