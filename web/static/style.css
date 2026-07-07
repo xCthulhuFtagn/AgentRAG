@@ -46,6 +46,33 @@ body,
   border-radius: 10px;
 }
 
+/* Parsed-text preview dialog — what the index actually stores for a file. */
+.parsed-card {
+  width: min(60rem, 92vw);
+  max-width: 92vw !important;   /* beat Quasar's 560px dialog-card cap */
+  height: 85vh;
+}
+.parsed-text {
+  white-space: pre-wrap;        /* keep the parser's line/paragraph breaks */
+  overflow-wrap: anywhere;
+  font-size: 0.86rem;
+  line-height: 1.45;
+  color: #0f172a;
+}
+.parsed-chunk {
+  border: 1px solid #bbf7d0;    /* green-200 */
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin: 4px 0;
+  background: #ffffff;
+}
+.parsed-chunk-tag {
+  font-family: ui-monospace, monospace;
+  font-size: 0.72rem;
+  color: #16a34a;               /* green-600 */
+  margin-bottom: 2px;
+}
+
 /* Frozen state: chat panel and the "Open in chat" button turn blue and tremble */
 .frozen {
   background: #dbeafe !important;            /* blue-100 */

@@ -255,10 +255,9 @@ async def index_files(
     else:
         descriptions = load_descriptions(db_path)
         used = set(await asyncio.to_thread(_sync_table_names, db))
-        by_file = {info.get("file"): tbl for tbl, info in descriptions.items()}
         for file_path in files:
-            old = by_file.get(file_path.name, safe_table_name(file_path.stem))
-            if old in used or old in descriptions:
+            old = table_for_file(file_path.name, descriptions=descriptions)
+            if old is not None and (old in used or old in descriptions):
                 await asyncio.to_thread(db.drop_table, old, ignore_missing=True)
                 used.discard(old)
                 descriptions.pop(old, None)
@@ -388,7 +387,60 @@ async def _index_one_file(
     print(f"    Done — {len(records)} vectors stored ({file_path.name})")
     if progress_cb:
         progress_cb(file_path.name, True)
-    return table_name, {"file": file_path.name, "description": description}
+    # chunk_overlap = the overlap these chunks were ACTUALLY cut with — read
+    # back by the parsed-text preview so merging strips the historical value
+    # even if the project's settings drift later (absent in legacy sidecars →
+    # consumers fall back to the currently resolved setting).
+    return table_name, {
+        "file": file_path.name,
+        "description": description,
+        "chunk_overlap": cfg["chunk_overlap"],
+    }
+
+
+def table_for_file(
+    file_name: str,
+    db_path: str | None = None,
+    descriptions: dict | None = None,
+    siblings: list[str] | None = None,
+) -> str | None:
+    """Table name backing one uploaded file, or None if unresolvable.
+
+    Single resolution point for file → table (the viewer, `index_files` and
+    `remove_files_from_index` all go through it). Ownership comes from the
+    descriptions sidecar; a sidecar-less file falls back to
+    `safe_table_name(stem)` — but only when the sidecar doesn't claim that
+    table for a DIFFERENT file. Two files whose stems sanitize to the same
+    base name (e.g. `file_copy.pdf` and `file (copy).pdf`) share a fallback
+    name while only one of them owns the table — treating the fallback as
+    "this file's table" made the incremental indexer silently drop the other
+    file's data, and the viewer render the wrong document. `descriptions`
+    lets a caller that already loaded (and is mutating) the sidecar pass it
+    in instead of re-reading it from `db_path`. `siblings` (the corpus's
+    other file names, when the caller knows them) extends the guard to
+    pure-legacy tables the sidecar has never seen: if ANOTHER sidecar-less
+    sibling sanitizes to the same fallback name, the table's owner is
+    genuinely unknowable → None (honest refusal beats rendering the wrong
+    document; a reindex writes the sidecar and resolves it).
+    """
+    if descriptions is None:
+        descriptions = load_descriptions(db_path)
+    for tbl, info in descriptions.items():
+        if info.get("file") == file_name:
+            return tbl
+    fallback = safe_table_name(Path(file_name).stem)
+    owner = descriptions.get(fallback, {}).get("file")
+    if owner not in (None, file_name):
+        return None
+    mapped = {info.get("file") for info in descriptions.values()}
+    for other in siblings or ():
+        if (
+            other != file_name
+            and other not in mapped
+            and safe_table_name(Path(other).stem) == fallback
+        ):
+            return None
+    return fallback
 
 
 async def remove_files_from_index(
@@ -405,9 +457,10 @@ async def remove_files_from_index(
         return
     db = get_sync_db(db_path)
     descriptions = load_descriptions(db_path)
-    by_file = {info.get("file"): tbl for tbl, info in descriptions.items()}
     for name in file_names:
-        table = by_file.get(name, safe_table_name(Path(name).stem))
+        table = table_for_file(name, descriptions=descriptions)
+        if table is None:  # fallback name owned by another file — nothing ours
+            continue
         await asyncio.to_thread(db.drop_table, table, ignore_missing=True)
         descriptions.pop(table, None)
     save_descriptions(db_path, descriptions)

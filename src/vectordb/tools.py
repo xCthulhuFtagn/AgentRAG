@@ -206,6 +206,55 @@ async def gather_neighbors(
     return result
 
 
+async def fetch_all_chunks(collection: str, db_path: str | None = None) -> list[dict]:
+    """Every stored chunk of one collection in document order — [{seq, text}].
+
+    Powers the web UI's parsed-text preview: reads the table content directly,
+    so what is shown is exactly what search sees (extracted → cleaned → chunked
+    at index time), not a re-parse of the source file. Legacy tables without a
+    `seq` column return rows in storage order with seq=None. Raises if the
+    collection does not exist (the caller decides how to report that).
+    """
+    db = await get_async_db(db_path)
+    table = await db.open_table(collection)
+    total = await table.count_rows()
+    if not total:
+        return []
+    try:
+        raw = await table.query().select(["seq", "text"]).limit(total).to_list()
+    except Exception:  # legacy table without the seq column
+        raw = await table.query().select(["text"]).limit(total).to_list()
+    rows = [{"seq": r.get("seq"), "text": r.get("text", "")} for r in raw]
+    if all(r["seq"] is not None for r in rows):
+        rows.sort(key=lambda r: r["seq"])
+    return rows
+
+
+def merge_chunk_texts(
+    texts: list[str], chunk_overlap: int = vdb_settings.chunk_overlap
+) -> str:
+    """Reassemble consecutive stored chunks into one continuous text.
+
+    Chunks share ~chunk_overlap chars at each boundary by construction; strip
+    the duplicated prefix (same drift-aware suffix/prefix match as the
+    stitching path) so a full-document read renders like the document, not
+    like overlapping windows. The search window is the overlap the chunks
+    were cut with, EXACTLY — not the 2x margin the stitching path uses:
+    stored chunks are stripped, so the true duplicated prefix never exceeds
+    chunk_overlap, while a wider window lets a repeated-character run at the
+    boundary (form blanks '____', rules '----', dot leaders) match past the
+    real overlap and silently swallow genuine content. Chunks were stripped
+    at index time, so boundaries re-join with a newline (the original
+    boundary whitespace is not recoverable).
+    """
+    if not texts:
+        return ""
+    parts = [texts[0]]
+    for prev, cur in zip(texts, texts[1:]):
+        parts.append(_strip_overlap(prev, cur, chunk_overlap))
+    return "\n".join(p for p in parts if p)
+
+
 async def count_chunks(collection: str, db_path: str | None = None) -> int | None:
     """Total number of chunks (rows) in one collection, or None if unreadable.
 

@@ -14,7 +14,9 @@ from pathlib import Path
 from nicegui import ui, events
 
 from src.logging_setup import setup_logging
-from src.vectordb.indexer import SUPPORTED_SUFFIXES
+from src.vectordb.descriptions import load_descriptions
+from src.vectordb.indexer import SUPPORTED_SUFFIXES, table_for_file
+from src.vectordb.tools import fetch_all_chunks, merge_chunk_texts
 from web import runtime
 from web.chat import run_chat
 from web.indexing import reindex_project, update_project_index
@@ -167,9 +169,11 @@ def index():
                     for f in files:
                         with ui.row().classes("w-full items-center no-wrap"):
                             ui.icon("description").classes("text-green-600")
+                            # min-w-0 + truncate: an unbreakable long filename
+                            # must shrink (ellipsis), not push the row wide.
                             ui.label(f"{f['name']}  ({f['size']} B)").classes(
-                                "grow text-sm"
-                            )
+                                "grow text-sm min-w-0 truncate"
+                            ).tooltip(f"{f['name']} ({f['size']} B)")
                             # status: None = pending, True = indexed, False = failed.
                             status = progress.get(f["name"])
                             if status is False:
@@ -178,6 +182,15 @@ def index():
                                 )
                             elif frozen and status is None:
                                 ui.spinner(size="sm").classes("text-green-600")
+                            view_btn = ui.button(
+                                icon="preview",
+                                on_click=lambda _=None, x=pid, n=f["name"]:
+                                    parsed_text_dialog(x, n),
+                            ).props("flat dense round")
+                            view_btn.tooltip("View parsed text (as indexed)")
+                            if frozen:
+                                # Mid-reindex the table may be dropped/rebuilt.
+                                view_btn.props("disable")
             edit_btn = ui.button(
                 "Edit files", icon="edit", on_click=lambda _=None, x=pid: enter_edit(x)
             ).props("flat dense").classes("w-full")
@@ -567,6 +580,80 @@ def index():
             return
         STORE.set_index_settings(pid, result)
         ui.notify("RAG process settings saved — applied from the next search", color="positive")
+
+    async def parsed_text_dialog(pid, name):
+        # Read straight from the project's LanceDB table — this is exactly the
+        # text the retriever searches (extracted → cleaned → chunked at index
+        # time), not a fresh re-parse of the source file.
+        db_path = STORE.db_path(pid)
+        descriptions = load_descriptions(db_path)
+        table = table_for_file(
+            name,
+            descriptions=descriptions,
+            # Sibling names let the resolver refuse a stem-colliding legacy
+            # table instead of rendering another file's content.
+            siblings=[f["name"] for f in STORE.list_files(pid)],
+        )
+        try:
+            rows = await fetch_all_chunks(table, db_path) if table else []
+        except Exception:
+            rows = []
+        if not rows:
+            ui.notify(
+                f"'{name}' has no viewable indexed text — indexing failed, is "
+                "still running, extracted nothing, or the file's table can't "
+                "be resolved unambiguously (a reindex fixes the latter)",
+                color="warning",
+            )
+            return
+        entry = descriptions.get(table, {})
+        description = entry.get("description", "")
+        # Prefer the overlap the chunks were ACTUALLY cut with (stored in the
+        # sidecar at index time); legacy sidecars → current setting. 0 is a
+        # legitimate stored value, so test for None, not falsiness.
+        overlap = entry.get("chunk_overlap")
+        if overlap is None:
+            overlap = STORE.get_index_settings(pid)["chunk_overlap"]
+        merged = merge_chunk_texts([r["text"] for r in rows], overlap)
+
+        def _chunk_block(i: int, r: dict) -> str:
+            seq = i if r["seq"] is None else r["seq"]
+            return (
+                "<div class='parsed-chunk'>"
+                f"<div class='parsed-chunk-tag'>chunk {seq} · {len(r['text'])} chars</div>"
+                f"<div class='parsed-text'>{html.escape(r['text'])}</div>"
+                "</div>"
+            )
+
+        chunks_html = "".join(_chunk_block(i, r) for i, r in enumerate(rows))
+        merged_html = f"<div class='parsed-text'>{html.escape(merged)}</div>"
+
+        with ui.dialog() as dialog, ui.card().classes("settings-card parsed-card"):
+            ui.label(f"Parsed text — {name}").classes("font-bold text-green-800")
+            ui.label(
+                f"Collection '{table}' · {len(rows)} chunks · {len(merged):,} chars"
+            ).classes("text-sm text-gray-500")
+            if description:
+                ui.label(description).classes("text-xs text-gray-600")
+            view = ui.toggle(
+                {"chunks": "Chunks (as stored)", "merged": "Continuous text"},
+                value="chunks",
+            ).props("dense no-caps")
+            with ui.scroll_area().classes("w-full grow"):
+                content = ui.html(chunks_html)
+            view.on_value_change(
+                lambda e: content.set_content(
+                    merged_html if e.value == "merged" else chunks_html
+                )
+            )
+            with ui.row().classes("w-full justify-end"):
+                ui.button("Close", on_click=lambda: dialog.submit(None)).props("flat")
+        await dialog
+        # A closed dialog is only hidden, never removed — for the other (tiny)
+        # dialogs that's harmless, but here both HTML payloads are the whole
+        # document, so drop the element instead of leaking one per preview.
+        dialog.clear()
+        dialog.delete()
 
     async def trigger_reindex(pid):
         # Show frozen UI immediately, then reindex, then unfreeze.
