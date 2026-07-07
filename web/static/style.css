@@ -11,6 +11,20 @@ body,
 .app-sidebar {
   background: #d1fae5;             /* emerald-100 — projects/files column */
 }
+/* Override NiceGUI's fixed 16rem height on scroll areas inside the sidebar
+   so the flex-[3]/flex-[2] weights actually distribute the available space. */
+.app-sidebar .nicegui-scroll-area {
+  height: auto;
+}
+/* Force the scroll-area's absolute-positioned content box to exactly fill
+   the scroll area horizontally.  Without left+right the absolute element's
+   width is shrink-to-fit (only min-width:100% is set), which makes children's
+   width:100% resolve as auto → content overflows → contain:strict clips the
+   rightmost icons. */
+.app-sidebar .q-scrollarea__content {
+  left: 0;
+  right: 0;
+}
 .chat-panel {
   background: #ffffff;            /* white chat on the green page background */
   border-color: #34d399;         /* emerald-400 */
@@ -160,7 +174,9 @@ body,
   padding: 9px 13px;
   font-size: 1rem;
   align-self: flex-end;
-  max-width: 80%;
+  /* 80% keeps bubbles narrow on small screens; the rem cap stops lines from
+     stretching unreadably wide once the chat panel fills a large screen. */
+  max-width: min(80%, 42rem);
 }
 .chat-bubble-assistant {
   background: #f1f5f9;           /* slate-100 */
@@ -170,10 +186,12 @@ body,
   font-size: 1rem;
   line-height: 1.5;
   align-self: flex-start;
-  max-width: 90%;
+  max-width: min(90%, 48rem);
 }
 
-/* Keep chat content inside the panel: wrap long text, never scroll sideways. */
+/* Keep chat content inside the panel: wrap long text, never scroll sideways.
+   max-width caps stay on the two bubble rules above (min(%, rem)) — this
+   rule only adds wrapping behavior, it must not reset them back to 100%. */
 .chat-bubble-user,
 .chat-bubble-assistant,
 .chat-bubble-assistant *,
@@ -181,6 +199,11 @@ body,
   overflow-wrap: anywhere;
   word-break: break-word;
   white-space: normal;
+}
+.chat-bubble-assistant * {
+  max-width: 100%;
+}
+.trace-step {
   max-width: 100%;
 }
 

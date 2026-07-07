@@ -116,8 +116,9 @@ def index():
         # scroll on refresh) lands on it instead of jumping away.
         active_pid = ctx["open_pid"]
         projects.sort(key=lambda p: p["id"] != active_pid)
-        # Scrollable — show ~2.5 projects so the files panel stays reachable.
-        with ui.scroll_area().classes("w-full").style("height: 230px"):
+        # Scrollable — grows to fill available sidebar height, weighted 3:2
+        # against the files list below so both stay reachable on any screen.
+        with ui.scroll_area().classes("w-full min-h-0 flex-[3]"):
             with ui.column().classes("w-full gap-2"):
                 for p in projects:
                     _project_card(p)
@@ -128,23 +129,29 @@ def index():
         # the ui.upload widget above it — rebuilding it mid-transfer tears down the
         # connections of other in-flight files (ClientDisconnect → silently lost).
         visible = [s for s in ctx["edit"]["files"] if not s["deleted"]]
-        with ui.scroll_area().classes("w-full").style("height: 150px"):
+        with ui.scroll_area().classes("w-full min-h-0 flex-[2]"):
             with ui.column().classes("w-full gap-1"):
                 if not visible:
                     ui.label("No files").classes("text-gray-400 text-sm")
                 for s in visible:
                     tag = " (new)" if s["origin"] == "new" else ""
-                    with ui.row().classes("w-full items-center no-wrap"):
-                        ui.icon("description").classes("text-green-600")
-                        ui.label(f"{s['name']}{tag}").classes("grow text-sm")
+                    with ui.row().classes(
+                        "w-full items-center no-wrap overflow-hidden"
+                    ):
+                        ui.icon("description").classes(
+                            "text-green-600 shrink-0"
+                        )
+                        ui.label(f"{s['name']}{tag}").classes(
+                            "grow text-sm min-w-0 truncate"
+                        )
                         ui.button(
                             icon="edit",
                             on_click=lambda _=None, x=s: stage_rename_dialog(x),
-                        ).props("flat dense round")
+                        ).props("flat dense round").classes("shrink-0")
                         ui.button(
                             icon="delete",
                             on_click=lambda _=None, x=s: stage_delete(x),
-                        ).props("flat dense round color=red")
+                        ).props("flat dense round color=red").classes("shrink-0")
 
     @ui.refreshable
     def files_panel():
@@ -156,19 +163,27 @@ def index():
             return
         frozen = runtime.is_frozen(pid)
         editing = bool(ctx["edit"]) and ctx["edit"]["pid"] == pid
-        ui.label(f"Files — {meta['name']}").classes("font-bold text-green-800")
+        ui.label(f"Files — {meta['name']}").classes("font-bold text-green-800 shrink-0")
 
         if not editing:
             # ── View mode: scrollable list (~4 files) + always-visible Edit ──
             files = STORE.list_files(pid)
-            with ui.scroll_area().classes("w-full").style("height: 150px"):
+            with ui.scroll_area().classes("w-full min-h-0 flex-[2]"):
                 with ui.column().classes("w-full gap-1"):
                     if not files:
                         ui.label("No files uploaded").classes("text-gray-400 text-sm")
                     progress = runtime.get_progress(pid)
                     for f in files:
-                        with ui.row().classes("w-full items-center no-wrap"):
-                            ui.icon("description").classes("text-green-600")
+                        # overflow-hidden: the label's truncate only kicks in
+                        # when the row clips its children; without it the row
+                        # stretches past the q-scrollarea (contain:strict clips
+                        # it) and the preview button is half-hidden.
+                        with ui.row().classes(
+                            "w-full items-center no-wrap overflow-hidden"
+                        ):
+                            ui.icon("description").classes(
+                                "text-green-600 shrink-0"
+                            )
                             # min-w-0 + truncate: an unbreakable long filename
                             # must shrink (ellipsis), not push the row wide.
                             ui.label(f"{f['name']}  ({f['size']} B)").classes(
@@ -177,40 +192,46 @@ def index():
                             # status: None = pending, True = indexed, False = failed.
                             status = progress.get(f["name"])
                             if status is False:
-                                ui.icon("error").classes("text-red-500").tooltip(
+                                ui.icon("error").classes(
+                                    "text-red-500 shrink-0"
+                                ).tooltip(
                                     "Indexing failed — this file is not searchable"
                                 )
                             elif frozen and status is None:
-                                ui.spinner(size="sm").classes("text-green-600")
+                                ui.spinner(size="sm").classes(
+                                    "text-green-600 shrink-0"
+                                )
                             view_btn = ui.button(
                                 icon="preview",
                                 on_click=lambda _=None, x=pid, n=f["name"]:
                                     parsed_text_dialog(x, n),
-                            ).props("flat dense round")
+                            ).props("flat dense round").classes("shrink-0")
                             view_btn.tooltip("View parsed text (as indexed)")
                             if frozen:
                                 # Mid-reindex the table may be dropped/rebuilt.
                                 view_btn.props("disable")
             edit_btn = ui.button(
                 "Edit files", icon="edit", on_click=lambda _=None, x=pid: enter_edit(x)
-            ).props("flat dense").classes("w-full")
+            ).props("flat dense").classes("w-full shrink-0")
             if frozen:
                 edit_btn.props("disable")
             return
 
         # ── Edit mode: upload + scrollable staged list + always-visible actions ──
-        ui.label("Editing — changes apply on Done").classes("text-xs text-blue-700")
+        ui.label("Editing — changes apply on Done").classes(
+            "text-xs text-blue-700 shrink-0"
+        )
         # hide-uploader-files: the uploader's own file rows are redundant —
         # staged files are listed below with rename/delete actions.
         ui.upload(
             on_upload=lambda e: stage_upload(e),
             auto_upload=True,
             multiple=True,
-        ).props(f'accept="{ACCEPT}"').classes("w-full hide-uploader-files")
+        ).props(f'accept="{ACCEPT}"').classes("w-full hide-uploader-files shrink-0")
 
         staged_files_list()
 
-        with ui.row().classes("w-full no-wrap gap-2"):
+        with ui.row().classes("w-full no-wrap gap-2 shrink-0"):
             ui.button("Cancel", on_click=lambda _=None: cancel_edit()).props("flat")
             ui.button(
                 "Done & update index", icon="check",
@@ -227,7 +248,7 @@ def index():
         pid = ctx["chat_pid"]
         frozen = bool(pid) and runtime.is_frozen(pid)
         base = (
-            "chat-panel w-full max-w-xl h-full flex flex-col gap-2 "
+            "chat-panel w-full h-full flex flex-col gap-2 "
             "p-3 rounded-lg border min-w-0"
         )
         with ui.column().classes(base + (" frozen" if frozen else "")):
@@ -858,13 +879,17 @@ def index():
     # ── layout ──
 
     with ui.row().classes("w-full h-screen no-wrap gap-0"):
-        with ui.column().classes("app-sidebar w-1/3 h-full p-3 gap-2 overflow-auto"):
-            ui.label("Projects").classes("text-xl font-bold text-green-800")
-            ui.button("＋ New project", on_click=new_project).props("color=primary")
+        with ui.column().classes(
+            "app-sidebar w-1/3 h-full p-3 gap-2 flex flex-col min-h-0 flex-nowrap"
+        ):
+            ui.label("Projects").classes("text-xl font-bold text-green-800 shrink-0")
+            ui.button("＋ New project", on_click=new_project).props(
+                "color=primary"
+            ).classes("shrink-0")
             projects_list()
-            ui.separator()
+            ui.separator().classes("shrink-0")
             files_panel()
-        with ui.column().classes("app-sidebar w-2/3 h-full p-3 items-center"):
+        with ui.column().classes("app-sidebar w-2/3 h-full p-3"):
             chat_panel()
 
     # Keep freeze visuals in sync with background reindexing, regardless of
