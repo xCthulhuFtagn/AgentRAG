@@ -26,6 +26,17 @@ class GeneralSettings(BaseSettings):
     # switch, no separate branch/deployment per provider.
     llm_provider: Literal["deepseek", "gigachat"] = "deepseek"
 
+    # Which embedding provider to use for chunk/index embeddings and search queries.
+    # "fastembed" — local ONNX model (paraphrase-multilingual-MiniLM-L12-v2, 384d),
+    #   air-gapped, no API cost. "gigachat" — GigaChat Embeddings API (2560d by
+    #   default), better multilingual alignment, needs network + credentials.
+    # Changing this requires a full reindex (vectors from different models are
+    # incompatible — a mismatch is detected at search time and raises an error).
+    embedding_provider: Literal["fastembed", "gigachat"] = "fastembed"
+    # GigaChat embedding model: EmbeddingsGigaR (2560d), Embeddings-2 (1024d),
+    # or GigaEmbeddings-3B-2025-09 (2048d). Only used when embedding_provider=gigachat.
+    gigachat_embedding_model: str = "EmbeddingsGigaR"
+
     # DeepSeek API (OpenAI-compatible)
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"

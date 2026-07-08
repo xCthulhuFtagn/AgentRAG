@@ -3,12 +3,20 @@
 - GRAPH: the compiled Agentic RAG graph (no checkpointer — see src/graph.py).
 - STORE: the ProjectStore.
 - per-project status (idle | reindexing) and asyncio locks for reindex.
+- OCR sidecar: auto-launched in a daemon thread when GigaChat credentials are
+  configured (GigaChat Vision OCR bypasses Tesseract for better multilingual
+  accuracy on scanned documents).
 """
 
 import asyncio
+import logging
 
 from src.graph import build_graph
+from src.config import general_settings
+from src.vectordb.config import vdb_settings
 from web.projects import ProjectStore
+
+log = logging.getLogger("agentrag.web")
 
 # Built once at import — reused for every chat request.
 GRAPH = build_graph()
@@ -74,3 +82,77 @@ def get_progress(pid: str) -> dict[str, bool]:
 
 def clear_progress(pid: str) -> None:
     _progress.pop(pid, None)
+
+
+# ── OCR GigaChat Vision sidecar — auto-launch ─────────────────────────────
+
+_OCR_DEFAULT_PORT = 8830
+_OCR_STARTUP_TIMEOUT = 10.0  # seconds to wait for the sidecar to become ready
+
+
+def _maybe_start_ocr_sidecar() -> None:
+    """Start the OCR GigaChat sidecar in a daemon thread if credentials exist.
+
+    When GigaChat is configured (credentials are present), the OCR sidecar is
+    launched automatically on http://127.0.0.1:{_OCR_DEFAULT_PORT}/ocr — no
+    separate process to manage. If OCR_SERVER_URL is already set to a DIFFERENT
+    URL (e.g. an EasyOCR/PaddleOCR sidecar), we don't override it.
+
+    When we auto-start, we also set ``vdb_settings.ocr_server_url`` so the
+    indexer's ``_get_parser()`` picks it up — LiteParse will then delegate OCR
+    to our sidecar instead of its built-in Tesseract.
+
+    The thread has auto-restart (if uvicorn dies, it restarts after a backoff),
+    and we poll the health endpoint at startup so the first OCR request never
+    hits an unbound port.
+    """
+    import time
+    import urllib.request
+
+    if not general_settings.gigachat_credentials:
+        log.info("OCR sidecar: GigaChat credentials not set — skipping auto-start")
+        return
+
+    existing = vdb_settings.ocr_server_url
+    if existing:
+        log.info(
+            "OCR sidecar: OCR_SERVER_URL already set to %s — skipping auto-start",
+            existing,
+        )
+        return
+
+    sidecar_url = f"http://127.0.0.1:{_OCR_DEFAULT_PORT}/ocr"
+    health_url = f"http://127.0.0.1:{_OCR_DEFAULT_PORT}/health"
+    from src.vectordb.ocr_gigachat_server import run_in_thread
+
+    run_in_thread(_OCR_DEFAULT_PORT)
+    vdb_settings.ocr_server_url = sidecar_url
+
+    # Block until the sidecar is actually listening, so the first OCR call
+    # (which may come within milliseconds) doesn't get a connection refused.
+    # Use a custom opener without proxy — urllib honours http_proxy by default
+    # and localhost through a proxy returns 502.
+    no_proxy_handler = urllib.request.ProxyHandler({})
+    no_proxy_opener = urllib.request.build_opener(no_proxy_handler)
+    deadline = time.monotonic() + _OCR_STARTUP_TIMEOUT
+    while time.monotonic() < deadline:
+        try:
+            resp = no_proxy_opener.open(health_url, timeout=2)
+            if resp.status == 200:
+                log.info(
+                    "OCR sidecar: ready on %s (set OCR_SERVER_URL to override)",
+                    sidecar_url,
+                )
+                return
+        except Exception:
+            pass
+        time.sleep(0.2)
+
+    log.warning(
+        "OCR sidecar: did not become ready within %.1fs — "
+        "OCR requests may fail until it starts",
+        _OCR_STARTUP_TIMEOUT,
+    )
+
+
+_maybe_start_ocr_sidecar()

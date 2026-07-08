@@ -6,9 +6,9 @@ LangChain @tool wrappers for use with bind_tools() in the Search Fanout agent.
 from langchain_core.tools import tool
 
 from src.vectordb.config import vdb_settings
-from src.vectordb.embeddings import embed
+from src.vectordb.embeddings import embed, _get_embedding_model_name, _get_embedding_dim
 from src.vectordb.client import get_async_db
-from src.vectordb.descriptions import load_descriptions
+from src.vectordb.descriptions import load_descriptions, validate_embedding_model
 
 
 def _rrf_merge(
@@ -74,6 +74,12 @@ async def vector_search(
     Returns:
         Dict with keys: collection, query, chunks (list of text), scores (list of distances).
     """
+    # Catch embedding model mismatches before producing garbage distances.
+    validate_embedding_model(
+        db_path,
+        expected_model=_get_embedding_model_name(),
+        expected_dim=_get_embedding_dim(),
+    )
     db = await get_async_db(db_path)
     try:
         table = await db.open_table(collection)
@@ -305,15 +311,25 @@ async def list_collections(db_path: str | None = None) -> list[str]:
 
 
 async def list_collections_described(db_path: str | None = None) -> list[dict]:
-    """List collections paired with their per-file content description.
+    """List collections paired with their per-file content description and language.
 
-    Returns [{collection, description}] — the description (from the sidecar
-    written at index time) helps the Planner pick a source from a summary, not
-    just the table name. Empty description for tables indexed before the feature.
+    Returns [{collection, description, language}] — the description (from the
+    sidecar written at index time) helps the Planner pick a source from a summary,
+    not just the table name; `language` is the ISO 639-1 code (default "ru" for
+    legacy sidecars). Empty description for tables indexed before the feature.
     """
+    validate_embedding_model(
+        db_path,
+        expected_model=_get_embedding_model_name(),
+        expected_dim=_get_embedding_dim(),
+    )
     names = await _list_table_names(db_path)
     descs = load_descriptions(db_path)
     return [
-        {"collection": n, "description": descs.get(n, {}).get("description", "")}
+        {
+            "collection": n,
+            "description": descs.get(n, {}).get("description", ""),
+            "language": descs.get(n, {}).get("language", "ru") or "ru",
+        }
         for n in names
     ]

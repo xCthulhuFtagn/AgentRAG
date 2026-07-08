@@ -23,10 +23,106 @@ from pathlib import Path
 from liteparse import LiteParse
 
 from src.vectordb.config import vdb_settings
-from src.vectordb.embeddings import embed_batch
+from src.vectordb.embeddings import (
+    embed_batch,
+    _get_embedding_model_name,
+    _get_embedding_dim,
+)
 from src.vectordb.client import get_sync_db
 from src.vectordb.describe import describe_document
-from src.vectordb.descriptions import load_descriptions, save_descriptions
+from src.vectordb.descriptions import (
+    load_descriptions,
+    save_descriptions,
+    language_for_collection,
+)
+
+# ISO 639-1 → LanceDB FTS language name. Anything not in this map falls back
+# to "Russian" (the corpus default — most of our documents are Russian).
+_ISO_LANG_TO_FTS: dict[str, str] = {
+    "ru": "Russian",
+    "en": "English",
+    "de": "German",
+    "fr": "French",
+    "es": "Spanish",
+    "it": "Italian",
+    "pt": "Portuguese",
+    "nl": "Dutch",
+    "pl": "Polish",
+    "uk": "Ukrainian",
+    "be": "Belarusian",
+    "bg": "Bulgarian",
+    "cs": "Czech",
+    "sk": "Slovak",
+    "sl": "Slovenian",
+    "hr": "Croatian",
+    "sr": "Serbian",
+    "mk": "Macedonian",
+    "da": "Danish",
+    "sv": "Swedish",
+    "no": "Norwegian",
+    "fi": "Finnish",
+    "et": "Estonian",
+    "lv": "Latvian",
+    "lt": "Lithuanian",
+    "el": "Greek",
+    "tr": "Turkish",
+    "ar": "Arabic",
+    "he": "Hebrew",
+    "fa": "Persian",
+    "hi": "Hindi",
+    "bn": "Bengali",
+    "th": "Thai",
+    "vi": "Vietnamese",
+    "zh": "Chinese",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ro": "Romanian",
+    "hu": "Hungarian",
+    "ca": "Catalan",
+    "eu": "Basque",
+    "gl": "Galician",
+    "cy": "Welsh",
+    "ga": "Irish",
+    "gd": "Scottish Gaelic",
+    "mt": "Maltese",
+    "is": "Icelandic",
+    "sq": "Albanian",
+    "hy": "Armenian",
+    "ka": "Georgian",
+    "az": "Azerbaijani",
+    "kk": "Kazakh",
+    "ky": "Kyrgyz",
+    "tg": "Tajik",
+    "tk": "Turkmen",
+    "uz": "Uzbek",
+    "mn": "Mongolian",
+    "id": "Indonesian",
+    "ms": "Malay",
+    "tl": "Tagalog",
+    "sw": "Swahili",
+    "af": "Afrikaans",
+    "am": "Amharic",
+    "ur": "Urdu",
+    "pa": "Punjabi",
+    "gu": "Gujarati",
+    "kn": "Kannada",
+    "ml": "Malayalam",
+    "mr": "Marathi",
+    "ta": "Tamil",
+    "te": "Telugu",
+    "si": "Sinhala",
+    "km": "Khmer",
+    "lo": "Lao",
+    "my": "Burmese",
+    "ne": "Nepali",
+    "ps": "Pashto",
+}
+
+
+def _fts_language(iso_lang: str) -> str:
+    """Map an ISO 639-1 code to a LanceDB FTS language name; fallback "Russian"."""
+    return _ISO_LANG_TO_FTS.get(iso_lang, "Russian")
+
 
 # Rich document formats parsed by LiteParse.
 DOC_SUFFIXES = {".pdf", ".docx", ".pptx"}
@@ -289,7 +385,14 @@ async def index_files(
             descriptions[table_name] = entry
 
     # Persist per-file descriptions next to the DB for the Planner to read.
-    save_descriptions(db_path, descriptions)
+    # Stamp the embedding model metadata so a later provider change is caught
+    # at search time (mismatched vectors → clear error, not garbage distances).
+    save_descriptions(
+        db_path,
+        descriptions,
+        embedding_model=_get_embedding_model_name(),
+        embedding_dim=_get_embedding_dim(),
+    )
     print(f"\nIndexing complete. DB at: {db_path}")
 
 
@@ -339,13 +442,14 @@ async def _index_one_file(
     # Embedding and the (optional) LLM description are independent given the
     # text — run them concurrently so the description adds little wall-clock.
     if cfg["descriptions_enabled"]:
-        embeddings, description = await asyncio.gather(
+        embeddings, (description, language) = await asyncio.gather(
             embed_batch(chunks),
             describe_document(text, cfg["describe_max_chars"]),
         )
     else:
         embeddings = await embed_batch(chunks)
         description = ""
+        language = "ru"
 
     # seq = chunk's position in the document — lets the retriever stitch
     # back contiguous neighborhoods (see gather_neighbors in tools.py).
@@ -368,15 +472,18 @@ async def _index_one_file(
     # search (BM25 + vector, see tools.py) has something to query — cheap, no
     # LLM involved. Built unconditionally regardless of the project's current
     # hybrid_search_enabled toggle, since the toggle only gates whether search
-    # USES it; a later "turn hybrid on" then needs no reindex. A failure here
-    # must not break indexing (legacy behavior: plain vector search still
+    # USES it; a later "turn hybrid on" then needs no reindex. The stemmer
+    # language now comes from the document's detected ISO 639-1 code (not
+    # hardcoded "Russian" — that was breaking non-Russian documents). A failure
+    # here must not break indexing (legacy behavior: plain vector search still
     # works without an FTS index).
+    fts_lang = _fts_language(language)
     try:
         await asyncio.to_thread(
             table.create_fts_index,
             "text",
             use_tantivy=False,
-            language="Russian",
+            language=fts_lang,
             stem=True,
             remove_stop_words=True,
             replace=True,
@@ -394,6 +501,7 @@ async def _index_one_file(
     return table_name, {
         "file": file_path.name,
         "description": description,
+        "language": language,
         "chunk_overlap": cfg["chunk_overlap"],
     }
 
