@@ -1,8 +1,11 @@
 """OCR sidecar — delegates image text recognition to GigaChat Vision API.
 
-A minimal HTTP server that implements the LiteParse OCR sidecar contract
-(POST /ocr, multipart image → {"text": "..."}). Uses GigaChat-2-Pro (the
-flagship model with vision support) via the GigaChat Python SDK.
+A minimal HTTP server that implements the LiteParse OCR sidecar contract:
+POST /ocr, multipart image → {"results": [{"text", "bbox", "confidence"}]}
+(the EasyOCR-server shape — LiteParse's HTTP OCR client rejects any other
+response as unparseable and the page counts as OCR-failed). Uses
+GigaChat-2-Pro (the flagship model with vision support) via the GigaChat
+Python SDK.
 
 Run standalone:
     python -m src.vectordb.ocr_gigachat_server --port 8830
@@ -18,6 +21,7 @@ used by the web app to auto-launch the sidecar alongside the main service.
 import argparse
 import asyncio
 import logging
+import random
 import threading
 import time
 from functools import lru_cache
@@ -69,6 +73,19 @@ def _guess_extension(image_bytes: bytes) -> str:
     return ".png"  # safe fallback — GigaChat Vision handles PNG
 
 
+def _image_size(image_bytes: bytes) -> tuple[int, int]:
+    """Best-effort (width, height) of the uploaded image; (0, 0) if unreadable."""
+    import io
+
+    try:
+        from PIL import Image
+
+        with Image.open(io.BytesIO(image_bytes)) as im:
+            return im.width, im.height
+    except Exception:
+        return 0, 0
+
+
 @lru_cache(maxsize=1)
 def _build_gigachat_client():
     """Create a GigaChat client for vision OCR, reading creds from settings.
@@ -98,6 +115,9 @@ def _build_gigachat_client():
             base_url=general_settings.gigachat_base_url,
             verify_ssl_certs=general_settings.gigachat_verify_ssl_certs,
             model="GigaChat-2-Pro",  # flagship with vision
+            # SDK default is 30s — a dense scanned page times out mid-reply
+            # ("The read operation timed out"); see gigachat_ocr_timeout.
+            timeout=general_settings.gigachat_ocr_timeout,
         )
         # Force-create internal httpx clients NOW, while proxy vars are cleared.
         # These are @property getters that lazily build httpx.Client/AsyncClient.
@@ -140,16 +160,33 @@ async def ocr_endpoint(request):
     original_name = getattr(image_field, "filename", None) or ""
 
     # The GigaChat SDK's upload_file + chat are synchronous — run off the event
-    # loop so the sidecar stays responsive to health checks.
+    # loop so the sidecar stays responsive to health checks. The semaphore caps
+    # in-flight GigaChat calls (GigaChat limits concurrent requests per
+    # account; excess fan-out = 429 storms) — waiters queue on the event loop,
+    # holding no threads. The CLIENT keeps the queue short: LiteParse's OCR
+    # HTTP client hard-times-out at 60s per request, queue time included, so
+    # the indexer bounds its page fan-out via vdb_settings.ocr_workers.
     try:
-        text = await asyncio.to_thread(_recognize_sync, image_bytes, original_name)
+        async with request.app.state.gigachat_semaphore:
+            text = await asyncio.to_thread(
+                _recognize_sync, image_bytes, original_name
+            )
     except Exception as e:
         log.warning("GigaChat Vision OCR failed: %s", e)
         return JSONResponse(
             {"error": f"OCR failed: {e}"}, status_code=500
         )
 
-    return JSONResponse({"text": text})
+    if not text:
+        return JSONResponse({"results": []})
+
+    # GigaChat Vision reads the whole image at once (no per-line coordinates),
+    # so the reply is a single full-image block. bbox is in the uploaded
+    # image's pixel space, like EasyOCR's.
+    width, height = _image_size(image_bytes)
+    return JSONResponse(
+        {"results": [{"text": text, "bbox": [0, 0, width, height], "confidence": 1.0}]}
+    )
 
 
 # ── Sync recognition (runs off the event loop) ────────────────────────────────
@@ -207,6 +244,15 @@ def _recognize_with_retry(filename: str, image_bytes: bytes) -> str:
             ]
             response = client.chat(Chat(messages=messages, max_tokens=4096))
             content = response.choices[0].message.content
+
+            # Best-effort cleanup: every page uploads an image into the
+            # account's quota-limited GigaChat file storage — a book-sized
+            # corpus is hundreds of files. Never fail the OCR over it.
+            try:
+                client.delete_file(file_id)
+            except Exception:
+                pass
+
             return (content or "").strip()
 
         except (RateLimitError, ServerError) as e:
@@ -215,12 +261,18 @@ def _recognize_with_retry(filename: str, image_bytes: bytes) -> str:
                 break
 
             # Honor the server's Retry-After if given; otherwise exponential
-            # backoff (with a minimum to avoid hammering).
+            # backoff. LiteParse OCRs pages concurrently (× several files
+            # concurrently during indexing), so many callers hit this at once
+            # with the same attempt number — a deterministic delay has them
+            # all retry together, in lockstep, producing repeated 429 waves
+            # instead of spreading out. Jitter (equal-jitter: half fixed, half
+            # random) decorrelates them while keeping the backoff's magnitude.
             ra = getattr(e, "retry_after", None)
             if ra and ra > 0:
-                delay = float(ra) + 1.0  # pad by 1s to be safe
+                base = float(ra) + 1.0  # pad by 1s to be safe
             else:
-                delay = min(_OCR_BACKOFF_BASE * (2 ** attempt), _OCR_BACKOFF_CAP)
+                base = min(_OCR_BACKOFF_BASE * (2 ** attempt), _OCR_BACKOFF_CAP)
+            delay = base / 2 + random.uniform(0, base / 2)
 
             log.info(
                 "OCR attempt %d/%d: %s — retrying in %.1fs",
@@ -240,12 +292,19 @@ async def health_endpoint(request):
 
 def make_app() -> Starlette:
     """Build the OCR sidecar ASGI app (importable for programmatic use)."""
-    return Starlette(
+    app = Starlette(
         routes=[
             Route("/ocr", ocr_endpoint, methods=["POST"]),
             Route("/health", health_endpoint, methods=["GET"]),
         ]
     )
+    # Created per app (not module level): run_in_thread restarts a crashed
+    # server on a NEW event loop, and an asyncio primitive must not outlive
+    # the loop it first awaited on.
+    app.state.gigachat_semaphore = asyncio.Semaphore(
+        general_settings.gigachat_ocr_concurrency
+    )
+    return app
 
 
 def run_server(port: int = 8830):

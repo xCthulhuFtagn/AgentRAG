@@ -37,6 +37,18 @@ class GeneralSettings(BaseSettings):
     # or GigaEmbeddings-3B-2025-09 (2048d). Only used when embedding_provider=gigachat.
     gigachat_embedding_model: str = "EmbeddingsGigaR"
 
+    # Which OCR engine handles scanned/image pages at index time — independent
+    # of LLM_PROVIDER (agents on DeepSeek + OCR on GigaChat is a valid split:
+    # GigaChat's per-account concurrency cap hurts the agents' parallel calls
+    # but is fine for the serialized OCR sidecar).
+    # "gigachat" — the web app auto-starts the built-in GigaChat Vision OCR
+    #   sidecar (src/vectordb/ocr_gigachat_server.py, :8830); needs
+    #   GIGACHAT_CREDENTIALS. "standard" — no auto-start: an explicitly set
+    #   OCR_SERVER_URL (external EasyOCR/PaddleOCR sidecar) is used as-is,
+    #   otherwise LiteParse's built-in Tesseract. A set OCR_SERVER_URL always
+    #   wins over the auto-start in either mode.
+    ocr_provider: Literal["gigachat", "standard"] = "standard"
+
     # DeepSeek API (OpenAI-compatible)
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com/v1"
@@ -63,6 +75,18 @@ class GeneralSettings(BaseSettings):
     # heavily rate-limited).
     gigachat_connection_retries: int = Field(default=3, ge=0)
     gigachat_retry_backoff_factor: float = Field(default=1.0, ge=0)
+    # Max in-flight GigaChat Vision calls in the OCR sidecar
+    # (src/vectordb/ocr_gigachat_server.py). GigaChat caps concurrent requests
+    # per account — paid tiers lift token quotas, not this cap — and an
+    # unbounded fan-out of page-OCR calls turns into 429 storms (including on
+    # the OAuth endpoint). Raise it only if the account's plan allows more
+    # simultaneous requests.
+    gigachat_ocr_concurrency: int = Field(default=2, ge=1)
+    # HTTP timeout (seconds) for the OCR sidecar's GigaChat client. The SDK
+    # default is 30s — too short to transcribe a dense scanned book page
+    # (thousands of output tokens). Ceiling is LiteParse's own hard 60s per
+    # OCR request: anything above ~55s just moves where the failure fires.
+    gigachat_ocr_timeout: float = Field(default=55.0, gt=0)
 
     # Agent loop
     max_iterations: int = Field(default=3, ge=1)

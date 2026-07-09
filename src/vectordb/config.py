@@ -76,6 +76,17 @@ class VectorDBSettings(BaseSettings):
     # Both unset → LiteParse's built-in Tesseract (current behavior).
     ocr_server_url: Optional[str] = None
     ocr_language: Optional[str] = None
+    # How many pages LiteParse OCRs concurrently per parse() call (its
+    # num_workers). None → LiteParse's own default (CPU cores - 1) — right for
+    # a local engine (Tesseract, GPU EasyOCR), but multiplied by
+    # index_concurrency files it floods a rate-limited remote sidecar with
+    # dozens of in-flight requests: each waits in the sidecar's queue, and
+    # LiteParse's OCR HTTP client times out at a hard 60s — queued pages then
+    # fail on timeout rather than wait their turn. Keep
+    # index_concurrency × ocr_workers × per-call latency well under 60s for a
+    # remote-API sidecar (the web's GigaChat auto-start defaults this to 1;
+    # see web/runtime.py).
+    ocr_workers: Optional[int] = Field(default=None, ge=1)
 
     @field_validator("ocr_server_url", "ocr_language", mode="before")
     @classmethod

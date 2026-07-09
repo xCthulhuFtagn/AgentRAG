@@ -92,9 +92,22 @@ python -m src.main --query "What CPU and RAM does the server for Project Alpha h
 ### Optional: better OCR for scanned / image documents
 
 By default LiteParse OCRs image content with its built-in **Tesseract**, which is
-weak on Cyrillic and noisy on tiny images (`Image too small to scale!!`). For
-better Russian OCR, run LiteParse's **EasyOCR sidecar** (from the upstream repo)
-and point the app at it:
+weak on Cyrillic and noisy on tiny images (`Image too small to scale!!`). The
+engine is picked by **`OCR_PROVIDER`** in `.env` — independent of `LLM_PROVIDER`
+(agents on DeepSeek + OCR on GigaChat is a valid split):
+
+**`OCR_PROVIDER=gigachat`** — zero extra processes: the web app auto-starts the
+built-in **GigaChat Vision** OCR sidecar (`src/vectordb/ocr_gigachat_server.py`,
+`:8830`; also runnable standalone via `python -m src.vectordb.ocr_gigachat_server`).
+Needs only `GIGACHAT_CREDENTIALS`. GigaChat caps concurrent requests per account,
+so the sidecar serializes calls (`GIGACHAT_OCR_CONCURRENCY`, default 1-2) and the
+indexer keeps its page fan-out at one page per file (`OCR_WORKERS` auto-set to 1);
+`GIGACHAT_OCR_TIMEOUT` (55s) fits dense pages under LiteParse's hard 60s/request
+cap. Slow for big corpora but needs no GPU and no extra install.
+
+**`OCR_PROVIDER=standard`** (default) — an explicitly set `OCR_SERVER_URL` wins;
+otherwise built-in Tesseract (works out of the box, no sidecar needed). For fast
+local Russian OCR run LiteParse's **EasyOCR sidecar** (from the upstream repo):
 
 ```bash
 # clone upstream and run the ready-made EasyOCR server (its own deps: torch/opencv)
@@ -106,9 +119,14 @@ uv run server.py                         # serves EasyOCR on http://localhost:88
 Then in the project's `.env` uncomment `OCR_SERVER_URL=http://localhost:8828/ocr`
 and `OCR_LANGUAGE=ru` and (re)index — LiteParse routes OCR to the sidecar. It runs
 in its own env (keeps torch out of the main app) and works offline once models are
-cached. The sidecar must be running before you index. **By default** `OCR_SERVER_URL`
-is unset, so OCR works out of the box with the built-in Tesseract — no sidecar
-needed. PaddleOCR (`ocr/paddleocr`, `:8829`) works the same way — just change the URL.
+cached. The sidecar must be running before you index. PaddleOCR (`ocr/paddleocr`,
+`:8829`) works the same way — just change the URL. Any OCR server must answer the
+LiteParse contract: `POST /ocr` (multipart image) →
+`{"results": [{"text", "bbox", "confidence"}]}`.
+
+> **Note:** `liteparse >= 2.0.8` is required — older releases crash with random
+> `PDF error: page not found` when several files are parsed concurrently (PDFium
+> is not thread-safe; fixed upstream in 2.0.8).
 
 ## Web interface (NiceGUI)
 

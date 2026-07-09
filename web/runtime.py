@@ -91,12 +91,16 @@ _OCR_STARTUP_TIMEOUT = 10.0  # seconds to wait for the sidecar to become ready
 
 
 def _maybe_start_ocr_sidecar() -> None:
-    """Start the OCR GigaChat sidecar in a daemon thread if credentials exist.
+    """Start the OCR GigaChat sidecar in a daemon thread if OCR_PROVIDER says so.
 
-    When GigaChat is configured (credentials are present), the OCR sidecar is
-    launched automatically on http://127.0.0.1:{_OCR_DEFAULT_PORT}/ocr — no
-    separate process to manage. If OCR_SERVER_URL is already set to a DIFFERENT
-    URL (e.g. an EasyOCR/PaddleOCR sidecar), we don't override it.
+    The sidecar follows the dedicated OCR_PROVIDER switch (independent of
+    LLM_PROVIDER — agents and OCR pick their providers separately): with
+    "gigachat" it auto-starts on http://127.0.0.1:{_OCR_DEFAULT_PORT}/ocr — no
+    separate process to manage — provided credentials are present. With
+    "standard" nothing is started: OCR uses an explicit OCR_SERVER_URL sidecar
+    (e.g. EasyOCR/PaddleOCR) or LiteParse's built-in Tesseract. If
+    OCR_SERVER_URL is already set to a DIFFERENT URL, we don't override it
+    either way.
 
     When we auto-start, we also set ``vdb_settings.ocr_server_url`` so the
     indexer's ``_get_parser()`` picks it up — LiteParse will then delegate OCR
@@ -108,6 +112,14 @@ def _maybe_start_ocr_sidecar() -> None:
     """
     import time
     import urllib.request
+
+    if general_settings.ocr_provider != "gigachat":
+        log.info(
+            "OCR sidecar: OCR_PROVIDER=%s — GigaChat OCR sidecar not started; "
+            "OCR uses OCR_SERVER_URL if set, else built-in Tesseract",
+            general_settings.ocr_provider,
+        )
+        return
 
     if not general_settings.gigachat_credentials:
         log.info("OCR sidecar: GigaChat credentials not set — skipping auto-start")
@@ -127,6 +139,14 @@ def _maybe_start_ocr_sidecar() -> None:
 
     run_in_thread(_OCR_DEFAULT_PORT)
     vdb_settings.ocr_server_url = sidecar_url
+    if vdb_settings.ocr_workers is None:
+        # LiteParse's default page fan-out (CPU cores - 1, × index_concurrency
+        # files) floods GigaChat's per-account concurrent-request cap, and
+        # pages queued behind the sidecar's own limiter die on LiteParse's
+        # hard 60s request timeout. One page per file in flight keeps
+        # index_concurrency × 1 ≤ the sidecar's gigachat_ocr_concurrency
+        # window. Explicit OCR_WORKERS in .env wins.
+        vdb_settings.ocr_workers = 1
 
     # Block until the sidecar is actually listening, so the first OCR call
     # (which may come within milliseconds) doesn't get a connection refused.

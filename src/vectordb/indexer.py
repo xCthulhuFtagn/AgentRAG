@@ -176,14 +176,27 @@ def _get_parser() -> LiteParse:
     """Cached LiteParse instance (spawns OCR workers lazily).
 
     When `OCR_SERVER_URL` is set, OCR is delegated to a local HTTP OCR sidecar
-    (EasyOCR/PaddleOCR) instead of the built-in Tesseract — better Cyrillic and
-    no 'Image too small to scale!!' native noise. Unset → built-in Tesseract.
-    Passing None for either arg is a no-op (LiteParse keeps its defaults).
+    (EasyOCR/PaddleOCR/GigaChat) instead of the built-in Tesseract — better
+    Cyrillic and no 'Image too small to scale!!' native noise. Unset → built-in
+    Tesseract. Passing None for either arg is a no-op (LiteParse keeps its
+    defaults).
+
+    Requires liteparse >= 2.0.8: `index_files` parses several files
+    concurrently (`asyncio.to_thread` × INDEX_CONCURRENCY), and PDFium — the
+    PDF backend — is not thread-safe at the process level, no matter how many
+    LiteParse instances are used. Older releases raced under concurrent
+    parsing (random per-run "PDF error: page not found" / "invalid PDF
+    format" on files that parse fine alone); 2.0.8 serializes PDFium access
+    behind a global mutex upstream ("Make LiteParse safe to share across
+    threads"), so one shared instance needs no extra locking here.
     """
     return LiteParse(
         quiet=True,
         ocr_server_url=vdb_settings.ocr_server_url,
         ocr_language=vdb_settings.ocr_language,
+        # Concurrent page-OCRs per parse (None → LiteParse default, cores-1).
+        # Must stay low for a rate-limited remote sidecar — see config.py.
+        num_workers=vdb_settings.ocr_workers,
     )
 
 
