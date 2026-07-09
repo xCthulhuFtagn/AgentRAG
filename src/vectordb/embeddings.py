@@ -101,12 +101,53 @@ async def _embed_gigachat(text: str) -> list[float]:
     return vec
 
 
+# GigaChat's gateway rejects large embedding payloads outright (413 Request
+# Entity Too Large) — a whole book's chunks in one aembed_documents call is
+# megabytes of JSON. Cap each request by count AND cumulative text size; both
+# limits are far under the observed rejection threshold, so 413 splitting
+# below is a fallback, not the normal path.
+_EMBED_BATCH_MAX_TEXTS = 64
+_EMBED_BATCH_MAX_CHARS = 100_000
+
+
 async def _embed_batch_gigachat(texts: list[str]) -> list[list[float]]:
-    """Batch embedding via GigaChat — embed_documents WITHOUT query prefix."""
+    """Batch embedding via GigaChat — embed_documents WITHOUT query prefix.
+
+    Requests go out sequentially (GigaChat caps concurrent requests per
+    account) in slices of ≤ _EMBED_BATCH_MAX_TEXTS / _EMBED_BATCH_MAX_CHARS.
+    A slice the gateway still 413s is halved recursively; a single text that
+    413s is genuinely unembeddable — re-raised.
+    """
+    from gigachat.exceptions import RequestEntityTooLargeError
+
     emb = _get_gigachat_embeddings()
-    # embed_documents does NOT use the query prefix — correct for passage/index
-    # embeddings. The query/document asymmetry is handled by the two methods.
-    vecs = await emb.aembed_documents(texts)
+
+    async def _embed_slice(slice_: list[str]) -> list[list[float]]:
+        try:
+            # embed_documents does NOT use the query prefix — correct for
+            # passage/index embeddings. The query/document asymmetry is
+            # handled by the two methods.
+            return await emb.aembed_documents(slice_)
+        except RequestEntityTooLargeError:
+            if len(slice_) == 1:
+                raise
+            mid = len(slice_) // 2
+            return await _embed_slice(slice_[:mid]) + await _embed_slice(slice_[mid:])
+
+    vecs: list[list[float]] = []
+    batch: list[str] = []
+    batch_chars = 0
+    for text in texts:
+        if batch and (
+            len(batch) >= _EMBED_BATCH_MAX_TEXTS
+            or batch_chars + len(text) > _EMBED_BATCH_MAX_CHARS
+        ):
+            vecs += await _embed_slice(batch)
+            batch, batch_chars = [], 0
+        batch.append(text)
+        batch_chars += len(text)
+    if batch:
+        vecs += await _embed_slice(batch)
     return vecs
 
 
