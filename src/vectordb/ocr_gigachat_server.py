@@ -38,17 +38,11 @@ OCR_PROMPT = (
     "Сохраняй структуру: абзацы, списки, заголовки — как видишь."
 )
 
-# GigaChat free tier (PERS scope) is heavily rate-limited — a burst of
-# concurrent OCR calls (LiteParse OCRs PDF pages in parallel × indexer
-# processes files in parallel) triggers 429s on both OAuth token exchange
-# AND the /files endpoint.  Serialise calls and delay between them.
-_OCR_SEMAPHORE = threading.Semaphore(1)  # fully serial — free tier can't handle even 2
+# GigaChat free tier (PERS scope) is heavily rate-limited.  Retry transient
+# failures (429 / 5xx) with exponential backoff + retry_after honouring.
 _OCR_MAX_RETRIES = 5
 _OCR_BACKOFF_BASE = 3.0   # seconds: 3 → 6 → 12 → 24 → 48 (capped)
 _OCR_BACKOFF_CAP = 60.0
-_OCR_COOLDOWN = 2.0       # forced wait between OCR calls to stay under the rate limit
-_last_ocr_ts: float = 0.0
-_ocr_ts_lock = threading.Lock()
 
 # Magic bytes → extension so GigaChat can infer the MIME type from the filename
 # even when the uploader doesn't send a recognised name.
@@ -163,9 +157,8 @@ async def ocr_endpoint(request):
 def _recognize_sync(image_bytes: bytes, original_name: str = "") -> str:
     """Upload image → GigaChat Vision → recognized text (sync, off-loop).
 
-    Serialised by a semaphore (free-tier rate limits) with retry on transient
-    failures (429 / 5xx).  A cooldown between calls keeps us under the rate
-    limiter's window.  Two-step GigaChat Vision flow:
+    Retries transient failures (429 / 5xx) with exponential backoff +
+    retry_after honouring.  Two-step GigaChat Vision flow:
     1. upload_file — sends the image with a filename whose extension tells
        GigaChat the MIME type (raw bytes → application/octet-stream → 400)
     2. chat with Messages(attachments=[file_id]) — vision model reads the image
@@ -173,8 +166,6 @@ def _recognize_sync(image_bytes: bytes, original_name: str = "") -> str:
     *original_name* is the filename from the multipart upload; if it lacks a
     recognised extension, we guess from magic bytes (fallback: .png).
     """
-    from gigachat.exceptions import RateLimitError, ServerError
-
     # Build a filename whose extension GigaChat can map to a MIME type.
     stem = Path(original_name).stem if original_name else "image"
     ext = Path(original_name).suffix if original_name else ""
@@ -184,26 +175,7 @@ def _recognize_sync(image_bytes: bytes, original_name: str = "") -> str:
         ext = _guess_extension(image_bytes)
     filename = f"{stem}{ext}"
 
-    acquired = _OCR_SEMAPHORE.acquire(timeout=120)
-    if not acquired:
-        raise RuntimeError("OCR semaphore timeout — too many concurrent OCR requests")
-
-    try:
-        # Enforce minimum spacing between OCR calls so we don't trip the rate
-        # limiter even on the first request of a burst.
-        global _last_ocr_ts
-        with _ocr_ts_lock:
-            since_last = time.monotonic() - _last_ocr_ts
-            if since_last < _OCR_COOLDOWN:
-                time.sleep(_OCR_COOLDOWN - since_last)
-
-        result = _recognize_with_retry(filename, image_bytes)
-
-        with _ocr_ts_lock:
-            _last_ocr_ts = time.monotonic()
-        return result
-    finally:
-        _OCR_SEMAPHORE.release()
+    return _recognize_with_retry(filename, image_bytes)
 
 
 def _recognize_with_retry(filename: str, image_bytes: bytes) -> str:
