@@ -124,6 +124,33 @@ def _fts_language(iso_lang: str) -> str:
     return _ISO_LANG_TO_FTS.get(iso_lang, "Russian")
 
 
+# ISO 639-1 → Tesseract traineddata code. tessdata_best filenames use ISO
+# 639-2/T, with a couple of Tesseract-specific exceptions (zh → "chi_sim").
+# Same key set as _ISO_LANG_TO_FTS — whatever describe_document can detect,
+# both FTS and Tesseract now have a mapping. A code missing here (or a
+# genuinely missing tessdata file for it) just means _index_one_file falls
+# back to the corpus-wide OCR_LANGUAGE default for that one file — extraction
+# still fails loudly (caught in _index_one_file) rather than mis-indexing.
+_ISO_TO_TESSERACT: dict[str, str] = {
+    "ru": "rus", "en": "eng", "de": "deu", "fr": "fra", "es": "spa",
+    "it": "ita", "pt": "por", "nl": "nld", "pl": "pol", "uk": "ukr",
+    "be": "bel", "bg": "bul", "cs": "ces", "sk": "slk", "sl": "slv",
+    "hr": "hrv", "sr": "srp", "mk": "mkd", "da": "dan", "sv": "swe",
+    "no": "nor", "fi": "fin", "et": "est", "lv": "lav", "lt": "lit",
+    "el": "ell", "tr": "tur", "ar": "ara", "he": "heb", "fa": "fas",
+    "hi": "hin", "bn": "ben", "th": "tha", "vi": "vie", "zh": "chi_sim",
+    "ja": "jpn", "ko": "kor", "ro": "ron", "hu": "hun", "ca": "cat",
+    "eu": "eus", "gl": "glg", "cy": "cym", "ga": "gle", "gd": "gla",
+    "mt": "mlt", "is": "isl", "sq": "sqi", "hy": "hye", "ka": "kat",
+    "az": "aze", "kk": "kaz", "ky": "kir", "tg": "tgk", "tk": "tuk",
+    "uz": "uzb", "mn": "mon", "id": "ind", "ms": "msa", "tl": "fil",
+    "sw": "swa", "af": "afr", "am": "amh", "ur": "urd", "pa": "pan",
+    "gu": "guj", "kn": "kan", "ml": "mal", "mr": "mar", "ta": "tam",
+    "te": "tel", "si": "sin", "km": "khm", "lo": "lao", "my": "mya",
+    "ne": "nep", "ps": "pus",
+}
+
+
 # Rich document formats parsed by LiteParse.
 DOC_SUFFIXES = {".pdf", ".docx", ".pptx"}
 # Plain-text formats read directly.
@@ -171,9 +198,9 @@ def safe_table_name(stem: str) -> str:
     return name
 
 
-@lru_cache(maxsize=1)
-def _get_parser() -> LiteParse:
-    """Cached LiteParse instance (spawns OCR workers lazily).
+@lru_cache(maxsize=8)
+def _get_parser(ocr_language: str | None) -> LiteParse:
+    """Cached LiteParse instance for a given OCR language (spawns OCR workers lazily).
 
     When `OCR_SERVER_URL` is set, OCR is delegated to a local HTTP OCR sidecar
     (EasyOCR/PaddleOCR/GigaChat) instead of the built-in Tesseract — better
@@ -181,36 +208,76 @@ def _get_parser() -> LiteParse:
     Tesseract. Passing None for either arg is a no-op (LiteParse keeps its
     defaults).
 
-    Requires liteparse >= 2.0.8: `index_files` parses several files
-    concurrently (`asyncio.to_thread` × INDEX_CONCURRENCY), and PDFium — the
-    PDF backend — is not thread-safe at the process level, no matter how many
-    LiteParse instances are used. Older releases raced under concurrent
-    parsing (random per-run "PDF error: page not found" / "invalid PDF
-    format" on files that parse fine alone); 2.0.8 serializes PDFium access
-    behind a global mutex upstream ("Make LiteParse safe to share across
-    threads"), so one shared instance needs no extra locking here.
+    Keyed by `ocr_language` rather than a single global instance: a per-file
+    detected language (see `_index_one_file`) needs its own
+    correctly-configured instance, and caching a handful of them (maxsize=8
+    comfortably covers a realistic corpus's language variety) avoids
+    reconstructing one per file. Safe to hold several concurrently — requires
+    liteparse >= 2.0.8: `index_files` parses several files concurrently
+    (`asyncio.to_thread` × INDEX_CONCURRENCY), and PDFium — the PDF backend —
+    is not thread-safe at the process level, no matter how many LiteParse
+    instances are used. Older releases raced under concurrent parsing
+    (random per-run "PDF error: page not found" / "invalid PDF format" on
+    files that parse fine alone); 2.0.8 serializes PDFium access behind a
+    global mutex upstream ("Make LiteParse safe to share across threads").
     """
     return LiteParse(
         quiet=True,
         ocr_server_url=vdb_settings.ocr_server_url,
-        ocr_language=vdb_settings.ocr_language,
+        ocr_language=ocr_language,
         # Concurrent page-OCRs per parse (None → LiteParse default, cores-1).
         # Must stay low for a rate-limited remote sidecar — see config.py.
         num_workers=vdb_settings.ocr_workers,
     )
 
 
-def extract_text(file_path: Path) -> str:
+def extract_text(file_path: Path, ocr_language: str | None = None) -> str:
     """Extract text from a supported file.
 
-    PDF/DOCX/PPTX via LiteParse; TXT/MD read directly.
+    PDF/DOCX/PPTX via LiteParse; TXT/MD read directly. `ocr_language`
+    overrides the corpus-wide `OCR_LANGUAGE` default for this call —
+    `_index_one_file` passes a per-file detected language here (mapped to its
+    Tesseract code via `_ISO_TO_TESSERACT`); None → `vdb_settings.ocr_language`.
     """
     ext = file_path.suffix.lower()
     if ext in TEXT_SUFFIXES:
         return file_path.read_text(encoding="utf-8")
     if ext in DOC_SUFFIXES:
-        return _get_parser().parse(str(file_path)).text
+        lang = ocr_language if ocr_language is not None else vdb_settings.ocr_language
+        return _get_parser(lang).parse(str(file_path)).text
     raise ValueError(f"Unsupported file type: {ext}")
+
+
+# Page range for the language-detection sample pass — large enough to
+# comfortably cover DESCRIBE_MAX_CHARS worth of text for a typical book-like
+# layout, small enough to stay fast even under OCR.
+_LANGUAGE_SAMPLE_PAGES = 5
+
+
+def extract_sample_text(file_path: Path) -> str:
+    """Bounded leading excerpt (first few pages) for language pre-detection.
+
+    Only meaningful for DOC_SUFFIXES — TEXT_SUFFIXES are already instant to
+    read in full (`_index_one_file` skips this path for them). Runs OCR under
+    the corpus-wide default `OCR_LANGUAGE` rather than any per-file language —
+    the file's real language is exactly what this sample exists to discover
+    before the full, possibly slow, pass. On built-in Tesseract (no
+    `OCR_SERVER_URL`) that default may itself be a Tesseract-native
+    multi-language string (e.g. "rus+eng") to cover a genuinely mixed corpus;
+    an external EasyOCR/PaddleOCR sidecar expects its own single-code format
+    instead, so don't set a compound value there.
+    """
+    ext = file_path.suffix.lower()
+    if ext not in DOC_SUFFIXES:
+        raise ValueError(f"Unsupported file type for sampling: {ext}")
+    parser = LiteParse(
+        quiet=True,
+        ocr_server_url=vdb_settings.ocr_server_url,
+        ocr_language=vdb_settings.ocr_language,
+        num_workers=vdb_settings.ocr_workers,
+        target_pages=f"1-{_LANGUAGE_SAMPLE_PAGES}",
+    )
+    return parser.parse(str(file_path)).text
 
 
 def clean_text(text: str) -> str:
@@ -430,11 +497,45 @@ async def _index_one_file(
     """
     print(f"  Indexing: {file_path.name} → table '{table_name}'")
 
+    is_doc = file_path.suffix.lower() in DOC_SUFFIXES
+    description, language = "", "ru"
+    ocr_language = None
+
+    # A scanned/rich document's OCR language isn't known yet — detect it from
+    # a bounded leading sample BEFORE the full (possibly slow, OCR-heavy)
+    # extraction, so the full pass can use the correct single-language
+    # Tesseract model instead of the generic multi-language default (see
+    # extract_sample_text). This makes describe_document's LLM call a
+    # prerequisite of extraction rather than overlapped with embedding (as it
+    # used to be) — the accuracy win is worth losing that overlap. A failure
+    # here (sample extraction or the LLM call) keeps the ("", "ru") default —
+    # same degradation describe_document falls back to internally — rather
+    # than blocking the file. TEXT_SUFFIXES are already instant to read in
+    # full, so they skip this and keep the old describe-while-embedding
+    # overlap further down.
+    if cfg["descriptions_enabled"] and is_doc:
+        try:
+            sample = await asyncio.to_thread(extract_sample_text, file_path)
+            description, language = await describe_document(
+                sample, cfg["describe_max_chars"]
+            )
+            # Only override the OCR language once we actually have a result —
+            # describe_document itself never raises (it degrades internally
+            # to ("", "ru")), so this only guards extract_sample_text failing.
+            # A failed sample means we know NOTHING about the language; keep
+            # ocr_language=None (the corpus-wide default) rather than forcing
+            # "rus" — conflating "detected ru" with "detection failed" would
+            # narrow OCR to Russian-only even for a non-Russian file whose
+            # sample happened to error out for an unrelated reason.
+            ocr_language = _ISO_TO_TESSERACT.get(language)
+        except Exception:
+            pass
+
     # Text extraction (LiteParse/OCR) and chunking are CPU-heavy and fully
     # synchronous — run them off the event loop so the caller's UI stays
     # responsive (the web reindex awaits this on the same loop as NiceGUI).
     try:
-        text = await asyncio.to_thread(extract_text, file_path)
+        text = await asyncio.to_thread(extract_text, file_path, ocr_language)
     except Exception as e:
         print(f"    Error extracting text ({file_path.name}): {e}")
         if progress_cb:
@@ -452,17 +553,18 @@ async def _index_one_file(
     )
     print(f"    {file_path.name}: {len(chunks)} chunks, embedding...")
 
-    # Embedding and the (optional) LLM description are independent given the
-    # text — run them concurrently so the description adds little wall-clock.
-    if cfg["descriptions_enabled"]:
+    if cfg["descriptions_enabled"] and not is_doc:
+        # TEXT_SUFFIXES: no OCR-language dependency, so embedding and the
+        # description call still run concurrently — description/language
+        # weren't produced by the sample-detection branch above (is_doc-only).
         embeddings, (description, language) = await asyncio.gather(
             embed_batch(chunks),
             describe_document(text, cfg["describe_max_chars"]),
         )
     else:
+        # Either descriptions are disabled, or this is a DOC file whose
+        # description+language already came from the sample pass above.
         embeddings = await embed_batch(chunks)
-        description = ""
-        language = "ru"
 
     # seq = chunk's position in the document — lets the retriever stitch
     # back contiguous neighborhoods (see gather_neighbors in tools.py).
