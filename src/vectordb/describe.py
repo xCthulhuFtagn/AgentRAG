@@ -106,6 +106,18 @@ _MODEL_LANG_TO_ISO: dict[str, str] = {
 # Closed set the model picks from — more reliable than free-form ISO code generation.
 _LANG_LITERAL = Literal[tuple(_MODEL_LANG_TO_ISO.keys()) + ("other",)]  # type: ignore[misc]
 
+# (iso_code, display_name) pairs for UI language pickers (e.g. the web app's
+# manual per-file language override) — mirrors the model's own closed set,
+# "other" excluded since it isn't a concrete language a downstream OCR engine
+# can target. Sorted by display name for a stable, readable UI list.
+SUPPORTED_LANGUAGES: list[tuple[str, str]] = sorted(
+    (
+        (iso, name.replace("_", " ").title())
+        for name, iso in _MODEL_LANG_TO_ISO.items()
+    ),
+    key=lambda pair: pair[1],
+)
+
 
 class DocumentDescription(BaseModel):
     """Per-document description + detected language for FTS indexing and routing."""

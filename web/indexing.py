@@ -54,6 +54,7 @@ async def reindex_project(pid: str) -> None:
                     db_path,
                     progress_cb=lambda fn, ok: runtime.mark_file(pid, fn, ok),
                     settings=store.get_index_settings(pid),
+                    manual_languages=store.get_file_languages(pid),
                 )
         finally:
             # Keep the progress map (failed files stay flagged until the next
@@ -93,6 +94,7 @@ async def update_project_index(
                     db_path,
                     progress_cb=lambda fn, ok: runtime.mark_file(pid, fn, ok),
                     settings=store.get_index_settings(pid),
+                    manual_languages=store.get_file_languages(pid),
                 )
         finally:
             runtime.set_status(pid, "idle")

@@ -380,13 +380,14 @@ async def index_documents(
     db_path: str = vdb_settings.lance_db_path,
     progress_cb: Callable[[str, bool], None] | None = None,
     settings: dict | None = None,
+    manual_languages: dict[str, list[str]] | None = None,
 ):
     """Index all documents from a directory into LanceDB (a from-scratch run).
 
     Each file becomes a separate LanceDB collection (table). `progress_cb`, if
     given, is called `(filename, ok)` once each file finishes — ok=False when it
     was skipped (extraction error / no text) — letting a UI show per-file
-    progress and flag failures.
+    progress and flag failures. `manual_languages` — see `index_files`.
     """
     docs_path = Path(docs_dir)
     if not docs_path.exists():
@@ -401,7 +402,10 @@ async def index_documents(
         return
 
     print(f"Found {len(files)} file(s) to index\n")
-    await index_files(files, db_path, progress_cb, fresh=True, settings=settings)
+    await index_files(
+        files, db_path, progress_cb, fresh=True, settings=settings,
+        manual_languages=manual_languages,
+    )
 
 
 async def index_files(
@@ -411,6 +415,7 @@ async def index_files(
     *,
     fresh: bool = False,
     settings: dict | None = None,
+    manual_languages: dict[str, list[str]] | None = None,
 ):
     """Index the given files into LanceDB, one table per file.
 
@@ -421,8 +426,16 @@ async def index_files(
     a `safe_table_name` fallback for sidecar-less legacy tables) is dropped
     up front so the index always reflects the file's current content, and the
     sidecar is merged, not overwritten.
+
+    `manual_languages` — {filename: [iso_code, ...]}, a per-file language
+    override set by the caller (the web edit dialog's language picker).
+    Bypasses the sample-detection LLM call for that file — see
+    `_index_one_file`. Absent/None or a file missing from the dict → the
+    usual auto-detect (or the corpus-wide `OCR_LANGUAGE` default when
+    descriptions are disabled).
     """
     cfg = resolve_index_settings(settings)
+    manual_languages = manual_languages or {}
     db = get_sync_db(db_path)
 
     if fresh:
@@ -457,7 +470,10 @@ async def index_files(
 
     async def _bounded(file_path: Path, table_name: str):
         async with semaphore:
-            return await _index_one_file(file_path, table_name, db_path, cfg, progress_cb)
+            return await _index_one_file(
+                file_path, table_name, db_path, cfg, progress_cb,
+                manual_languages.get(file_path.name),
+            )
 
     results = await asyncio.gather(*[_bounded(fp, tn) for fp, tn in assignments])
     for table_name, entry in results:
@@ -482,6 +498,7 @@ async def _index_one_file(
     db_path: str,
     cfg: dict,
     progress_cb: Callable[[str, bool], None] | None,
+    manual_language: list[str] | None = None,
 ) -> tuple[str, dict | None]:
     """Extract, chunk, embed and store one file into its own table.
 
@@ -490,6 +507,12 @@ async def _index_one_file(
     the caller's, since get_sync_db is a cheap handle (not cached) and several
     of these connections may be doing disk writes to DIFFERENT tables at once
     from different threads (asyncio.to_thread).
+
+    `manual_language` — user-set language(s) for this file (web edit dialog),
+    ISO 639-1 codes. Bypasses the sample-detection LLM call entirely (we
+    already know the language); a description is still generated below on the
+    full text when descriptions are enabled, just with its guessed `language`
+    overridden by this value.
 
     Returns (table_name, description_entry); description_entry is None when
     the file was skipped (extraction failed / no text extracted) — the caller
@@ -501,19 +524,32 @@ async def _index_one_file(
     description, language = "", "ru"
     ocr_language = None
 
-    # A scanned/rich document's OCR language isn't known yet — detect it from
-    # a bounded leading sample BEFORE the full (possibly slow, OCR-heavy)
-    # extraction, so the full pass can use the correct single-language
-    # Tesseract model instead of the generic multi-language default (see
-    # extract_sample_text). This makes describe_document's LLM call a
-    # prerequisite of extraction rather than overlapped with embedding (as it
-    # used to be) — the accuracy win is worth losing that overlap. A failure
-    # here (sample extraction or the LLM call) keeps the ("", "ru") default —
-    # same degradation describe_document falls back to internally — rather
-    # than blocking the file. TEXT_SUFFIXES are already instant to read in
-    # full, so they skip this and keep the old describe-while-embedding
-    # overlap further down.
-    if cfg["descriptions_enabled"] and is_doc:
+    if manual_language:
+        # The user already told us the language(s) — skip the sample-based
+        # guess. Multiple languages join into Tesseract's native "+" syntax
+        # (confirmed working with the installed liteparse); a code missing
+        # from _ISO_TO_TESSERACT is silently dropped rather than raising, so
+        # one bad entry doesn't block the rest.
+        language = manual_language[0]
+        if is_doc:
+            joined = "+".join(
+                _ISO_TO_TESSERACT[c] for c in manual_language if c in _ISO_TO_TESSERACT
+            )
+            ocr_language = joined or None
+    elif cfg["descriptions_enabled"] and is_doc:
+        # A scanned/rich document's OCR language isn't known yet — detect it
+        # from a bounded leading sample BEFORE the full (possibly slow,
+        # OCR-heavy) extraction, so the full pass can use the correct
+        # single-language Tesseract model instead of the generic
+        # multi-language default (see extract_sample_text). This makes
+        # describe_document's LLM call a prerequisite of extraction rather
+        # than overlapped with embedding (as it used to be) — the accuracy
+        # win is worth losing that overlap. A failure here (sample extraction
+        # or the LLM call) keeps the ("", "ru") default — same degradation
+        # describe_document falls back to internally — rather than blocking
+        # the file. TEXT_SUFFIXES are already instant to read in full, so
+        # they skip this and keep the old describe-while-embedding overlap
+        # further down.
         try:
             sample = await asyncio.to_thread(extract_sample_text, file_path)
             description, language = await describe_document(
@@ -553,17 +589,23 @@ async def _index_one_file(
     )
     print(f"    {file_path.name}: {len(chunks)} chunks, embedding...")
 
-    if cfg["descriptions_enabled"] and not is_doc:
-        # TEXT_SUFFIXES: no OCR-language dependency, so embedding and the
-        # description call still run concurrently — description/language
-        # weren't produced by the sample-detection branch above (is_doc-only).
-        embeddings, (description, language) = await asyncio.gather(
+    # A description hasn't been generated yet when: descriptions are on AND
+    # either (a) the language was manually set (the sample-pass branch above
+    # was skipped entirely) or (b) this is a TEXT_SUFFIXES file (never went
+    # through that branch, is_doc-only). Not needed when the sample pass
+    # above already produced one.
+    need_full_describe = cfg["descriptions_enabled"] and (
+        manual_language is not None or not is_doc
+    )
+    if need_full_describe:
+        embeddings, (description, guessed_language) = await asyncio.gather(
             embed_batch(chunks),
             describe_document(text, cfg["describe_max_chars"]),
         )
+        if manual_language is None:
+            language = guessed_language
+        # else: keep the manual language, discard the LLM's guess
     else:
-        # Either descriptions are disabled, or this is a DOC file whose
-        # description+language already came from the sample pass above.
         embeddings = await embed_batch(chunks)
 
     # seq = chunk's position in the document — lets the retriever stitch

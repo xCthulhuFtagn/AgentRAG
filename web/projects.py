@@ -110,6 +110,30 @@ class ProjectStore:
         self._write_meta(pid, meta)
         return meta["index_settings"]
 
+    # ── per-file manual language overrides ──
+
+    def get_file_languages(self, pid: str) -> dict[str, list[str]]:
+        """{filename: [iso_code, ...]} for files with a user-set language.
+
+        Files absent from this dict get auto-detected as usual — see
+        `_index_one_file` in `src/vectordb/indexer.py`.
+        """
+        meta = self._read_meta(pid)
+        return meta.get("file_languages", {})
+
+    def set_file_languages(self, pid: str, languages: dict[str, list[str]]) -> None:
+        """Overwrite the whole file→language(s) map in one atomic write.
+
+        Called once per edit-commit with the final state of every surviving
+        staged file (see `commit_edit` in `web/app.py`) rather than patched
+        incrementally per rename/delete — a rename's new name and a
+        deletion's absence are already reflected in that final state, so
+        there's nothing extra to reconcile here.
+        """
+        meta = self._read_meta(pid)
+        meta["file_languages"] = languages
+        self._write_meta(pid, meta)
+
     # ── files (directory is the source of truth) ──
 
     def list_files(self, pid: str) -> list[dict]:

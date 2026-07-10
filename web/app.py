@@ -14,6 +14,7 @@ from pathlib import Path
 from nicegui import ui, events
 
 from src.logging_setup import setup_logging
+from src.vectordb.describe import SUPPORTED_LANGUAGES
 from src.vectordb.descriptions import load_descriptions
 from src.vectordb.indexer import SUPPORTED_SUFFIXES, table_for_file
 from src.vectordb.tools import fetch_all_chunks, merge_chunk_texts
@@ -144,9 +145,13 @@ def index():
                         ui.label(f"{s['name']}{tag}").classes(
                             "grow text-sm min-w-0 truncate"
                         )
+                        if s.get("language"):
+                            ui.label("+".join(s["language"]).upper()).classes(
+                                "text-xs text-gray-400 shrink-0"
+                            ).tooltip("Manually set language(s) — skips auto-detection")
                         ui.button(
                             icon="edit",
-                            on_click=lambda _=None, x=s: stage_rename_dialog(x),
+                            on_click=lambda _=None, x=s: stage_edit_dialog(x),
                         ).props("flat dense round").classes("shrink-0")
                         ui.button(
                             icon="delete",
@@ -715,9 +720,11 @@ def index():
 
     def enter_edit(pid):
         # Snapshot the current on-disk files as the starting staged set.
+        saved_languages = STORE.get_file_languages(pid)
         staged = [
             {"name": f["name"], "origin": "disk", "orig_name": f["name"],
-             "content": None, "deleted": False}
+             "content": None, "deleted": False,
+             "language": saved_languages.get(f["name"])}
             for f in STORE.list_files(pid)
         ]
         ctx["edit"] = {"pid": pid, "files": staged}
@@ -749,32 +756,64 @@ def index():
         content = await e.file.read()
         ctx["edit"]["files"].append(
             {"name": name, "origin": "new", "orig_name": None,
-             "content": content, "deleted": False}
+             "content": content, "deleted": False, "language": None}
         )
         # Refresh only the list — NOT files_panel — so the ui.upload widget
         # survives and other files in this batch keep transferring.
         staged_files_list.refresh()
 
-    async def stage_rename_dialog(entry):
-        with ui.dialog() as dialog, ui.card():
-            ui.label("Rename file").classes("font-bold")
-            inp = ui.input("New filename", value=entry["name"]).props("autofocus")
-            with ui.row():
+    async def stage_edit_dialog(entry):
+        with ui.dialog() as dialog, ui.card().classes("w-[28rem] max-w-full"):
+            ui.label("Edit file").classes("font-bold")
+            inp = ui.input("Filename", value=entry["name"]).classes("w-full").props("autofocus")
+
+            ui.label("Language(s) — none selected = auto-detect").classes(
+                "text-sm text-gray-500 mt-2"
+            )
+            selected = set(entry.get("language") or [])
+            filter_inp = ui.input("Filter languages").classes("w-full").props("dense clearable")
+            checkboxes: dict[str, ui.checkbox] = {}
+            # (checkbox, lowercased label) pairs for the filter below — a
+            # separate list rather than re-deriving from `checkboxes` each
+            # keystroke, since dict insertion order already matches SUPPORTED_LANGUAGES.
+            checkbox_rows: list[tuple[ui.checkbox, str]] = []
+            with ui.scroll_area().classes("w-full h-56 border rounded"):
+                with ui.grid(columns=2).classes("w-full gap-x-2 gap-y-0"):
+                    for code, label in SUPPORTED_LANGUAGES:
+                        cb = ui.checkbox(label, value=code in selected).props("dense")
+                        checkboxes[code] = cb
+                        checkbox_rows.append((cb, label.lower()))
+
+            def apply_filter(_=None):
+                query = (filter_inp.value or "").strip().lower()
+                for cb, label_lower in checkbox_rows:
+                    cb.set_visibility(query in label_lower)
+
+            filter_inp.on_value_change(apply_filter)
+
+            with ui.row().classes("w-full justify-end mt-2"):
                 ui.button("Cancel", on_click=lambda: dialog.submit(None)).props("flat")
-                ui.button("Save", on_click=lambda: dialog.submit(inp.value))
+                ui.button(
+                    "Save",
+                    on_click=lambda: dialog.submit(
+                        {
+                            "name": inp.value,
+                            "language": [c for c, cb in checkboxes.items() if cb.value],
+                        }
+                    ),
+                )
         result = await dialog
-        if not result:
+        if result is None:
             return
-        new_name = Path(result).name
-        if new_name == entry["name"]:
-            return
+        new_name = Path(result["name"]).name
         if Path(new_name).suffix.lower() not in SUPPORTED_SUFFIXES:
             ui.notify(f"Unsupported file type: {new_name}", color="negative")
             return
-        if new_name in _visible_names():
+        if new_name != entry["name"] and new_name in _visible_names():
             ui.notify(f"A file named '{new_name}' already exists", color="negative")
             return
         entry["name"] = new_name
+        entry["language"] = result["language"] or None
         staged_files_list.refresh()
 
     def stage_delete(entry):
@@ -798,6 +837,9 @@ def index():
         renames: list[tuple[str, str]] = []    # (orig_name, new_name)
         uploads: list[tuple[str, bytes]] = []  # (name, content)
 
+        prev_languages = STORE.get_file_languages(pid)
+        final_languages: dict[str, list[str]] = {}
+
         final_names: set[str] = set()
         for s in ctx["edit"]["files"]:
             if s["deleted"]:
@@ -810,12 +852,19 @@ def index():
                 ui.notify(f"Duplicate filename: {name}", color="negative")
                 return
             final_names.add(name)
+            if s.get("language"):
+                final_languages[name] = s["language"]
             if s["origin"] == "new":
                 uploads.append((name, s["content"]))
                 added.append(name)
             elif name != s["orig_name"]:  # renamed → new table name
                 renames.append((s["orig_name"], name))
                 removed.append(s["orig_name"])
+                added.append(name)
+            elif s.get("language") != prev_languages.get(name):
+                # Same file, same name, but its manual language changed —
+                # needs re-indexing under the new language even though
+                # nothing else about it did.
                 added.append(name)
 
         if not added and not removed:
@@ -847,6 +896,7 @@ def index():
         except (ValueError, OSError) as ex:
             ui.notify(str(ex), color="negative")
             return
+        STORE.set_file_languages(pid, final_languages)
         ctx["edit"] = None
         # Notify before trigger_update: it refreshes files_panel, which deletes
         # this handler's slot — any ui.* call after that would crash.
