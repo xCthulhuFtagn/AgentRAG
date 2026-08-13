@@ -311,6 +311,13 @@ class AgentRAGState(TypedDict):
 
     # Search Fanout
     search_results: Annotated[list[dict], operator.add]
+    # Per-run memo of rerank verdicts: {chunk text → bool}, filled only with
+    # SUCCESSFUL assessments (True/False). Iteration searches re-fetch chunks
+    # already judged in an earlier turn — the memo lets them keep their
+    # verdict without a repeat LLM call. A failed assessment (None) is never
+    # memoized, so it is re-attempted next turn exactly as before. The user
+    # query is constant for the whole run, so the chunk text alone is the key.
+    relevance_memo: dict[str, bool]
 
     # Sufficient Context
     sufficient: Optional[bool]
@@ -357,6 +364,7 @@ def make_initial_state(
         rewritten_queries=[],
         search_tasks=[],
         search_results=[],
+        relevance_memo={},
         sufficient=None,
         sufficient_reason="",
         feedback="",

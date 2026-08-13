@@ -270,6 +270,17 @@ async def _assess_one(chunk: str, query: str, llm) -> bool | None:
         return None
 
 
+@lru_cache(maxsize=1)
+def _chunk_relevance_llm():
+    """Structured LLM for per-chunk relevance assessment (cached).
+
+    assess_chunks_relevance runs once per search fanout — rebuilding the
+    with_structured_output chain each time is needless; schema and
+    temperature are constants, so one instance serves the whole process.
+    """
+    return get_structured_llm(ChunkRelevanceResult, temperature=0.0)
+
+
 async def assess_chunks_relevance(
     chunks: list[str], query: str
 ) -> list[bool | None]:
@@ -283,7 +294,7 @@ async def assess_chunks_relevance(
     """
     if not chunks:
         return []
-    llm = get_structured_llm(ChunkRelevanceResult, temperature=0.0)
+    llm = _chunk_relevance_llm()
     tasks = [_assess_one(c, query, llm) for c in chunks]
     return list(await asyncio.gather(*tasks))
 

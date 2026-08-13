@@ -19,6 +19,7 @@ from langgraph.types import Command
 from src.state import AgentRAGState, PlanResult, make_trace_entry
 from src.agents.common import (
     collection_search_stats,
+    format_inventory,
     format_search_stats_for_planner,
     generate_structured,
 )
@@ -155,20 +156,23 @@ async def planner_node(
     db_path = state.get("db_path")
     if vdb_settings.descriptions_enabled:
         described = await list_collections_described(db_path)
-        lines = [
-            f"- {c['collection']} — {c['description'] or '(без описания)'}"
-            for c in described
-        ]
+        # format_inventory renders exactly the "- name — description" lines
+        # built here before; the empty-KB fallback keeps the planner's own
+        # wording (format_inventory's differs).
+        collections_str = (
+            format_inventory(described)
+            if described
+            else "(коллекций пока нет — сначала проиндексируйте документы)"
+        )
     else:
         names = await list_collections.ainvoke({"db_path": db_path})
         described = [{"collection": n, "description": ""} for n in names]
-        lines = [f"- {n}" for n in names]
+        collections_str = (
+            "\n".join(f"- {n}" for n in names)
+            if names
+            else "(коллекций пока нет — сначала проиндексируйте документы)"
+        )
     available = [c["collection"] for c in described]
-    collections_str = (
-        "\n".join(lines)
-        if lines
-        else "(коллекций пока нет — сначала проиндексируйте документы)"
-    )
 
     # Iteration mode: the Sufficient Context Agent sent us back to RE-ROUTE for
     # the missing pieces (Google's loop re-enters before Search Plan). Plan a

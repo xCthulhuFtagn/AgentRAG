@@ -21,6 +21,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from liteparse import LiteParse
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 from src.vectordb.config import vdb_settings
 from src.vectordb.embeddings import (
@@ -254,6 +255,25 @@ def extract_text(file_path: Path, ocr_language: str | None = None) -> str:
 _LANGUAGE_SAMPLE_PAGES = 5
 
 
+@lru_cache(maxsize=8)
+def _get_sample_parser(ocr_language: str | None) -> LiteParse:
+    """Cached LiteParse instance for the language-detection sample pass.
+
+    Same reuse pattern as `_get_parser` (one instance, many parse calls —
+    concurrent use across files is already the norm there and relies on the
+    upstream PDFium mutex, liteparse >= 2.0.8); a fresh instance per file
+    (the old behavior) buys nothing since every call uses the identical
+    configuration: corpus-wide OCR default + the fixed sample page range.
+    """
+    return LiteParse(
+        quiet=True,
+        ocr_server_url=vdb_settings.ocr_server_url,
+        ocr_language=ocr_language,
+        num_workers=vdb_settings.ocr_workers,
+        target_pages=f"1-{_LANGUAGE_SAMPLE_PAGES}",
+    )
+
+
 def extract_sample_text(file_path: Path) -> str:
     """Bounded leading excerpt (first few pages) for language pre-detection.
 
@@ -270,14 +290,7 @@ def extract_sample_text(file_path: Path) -> str:
     ext = file_path.suffix.lower()
     if ext not in DOC_SUFFIXES:
         raise ValueError(f"Unsupported file type for sampling: {ext}")
-    parser = LiteParse(
-        quiet=True,
-        ocr_server_url=vdb_settings.ocr_server_url,
-        ocr_language=vdb_settings.ocr_language,
-        num_workers=vdb_settings.ocr_workers,
-        target_pages=f"1-{_LANGUAGE_SAMPLE_PAGES}",
-    )
-    return parser.parse(str(file_path)).text
+    return _get_sample_parser(vdb_settings.ocr_language).parse(str(file_path)).text
 
 
 def clean_text(text: str) -> str:
@@ -305,8 +318,6 @@ def split_text(
     word boundaries (RecursiveCharacterTextSplitter), keeping ~chunk_size chars
     with `overlap` carried between chunks for context continuity.
     """
-    from langchain_text_splitters import RecursiveCharacterTextSplitter
-
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=chunk_size,
         chunk_overlap=overlap,

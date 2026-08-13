@@ -82,5 +82,37 @@ async def test_get_async_db_is_cached_and_invalidated(tmp_path):
     assert db3 is not db1  # a fresh connection is opened after invalidation
 
 
+# ── Sidecar / table-listing caches (A: search-time re-reads) ─────────────────
+
+def test_load_descriptions_cache_tracks_rewrites(tmp_path):
+    from src.vectordb.descriptions import load_descriptions, save_descriptions
+
+    path = str(tmp_path)
+    assert load_descriptions(path) == {}
+
+    save_descriptions(path, {"tbl": {"file": "a.txt", "description": "d"}})
+    second = load_descriptions(path)
+    assert second == {"tbl": {"file": "a.txt", "description": "d"}}
+
+    # A returned dict is a copy — mutating it must not corrupt the cache.
+    second["tbl"]["description"] = "mutated"
+    third = load_descriptions(path)
+    assert third["tbl"]["description"] == "d"
+
+
+@pytest.mark.asyncio
+async def test_list_table_names_cache_invalidates_on_new_table(tmp_path):
+    from src.vectordb.tools import _list_table_names
+
+    path = str(tmp_path / "listing_cache")
+    db = await get_async_db(path)
+    assert await _list_table_names(path) == []
+
+    await db.create_table(
+        "alpha", data=[{"text": "hello", "vector": [0.1] * 4, "seq": 0}]
+    )
+    assert await _list_table_names(path) == ["alpha"]
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

@@ -7,10 +7,12 @@ while the project's vector DB reindexes.
 Run: python -m web.app
 """
 
+import asyncio
 import html
 import uuid
 from pathlib import Path
 
+from nicegui import app as nicegui_app
 from nicegui import ui, events
 
 from src.logging_setup import setup_logging
@@ -23,6 +25,27 @@ from web.chat import run_chat
 from web.indexing import reindex_project, update_project_index
 
 setup_logging()  # node decisions → console, same logs as the CLI
+
+
+@nicegui_app.on_startup
+async def _preload_embedding_model():
+    """Warm the FastEmbed ONNX model before serving.
+
+    Without this, the first query of a fresh process pays a multi-second
+    load (the ~252MB model file + ONNX session init) inside its first search.
+    Runs off the event loop in a thread; the GigaChat embedding provider has
+    nothing local to preload.
+    """
+    from src.config import general_settings
+
+    if general_settings.embedding_provider != "fastembed":
+        return
+    from src.vectordb.embeddings import _get_fastembed_model
+
+    model = _get_fastembed_model()
+    # A real embed forces the lazy ONNX session load now, not on first query.
+    await asyncio.to_thread(lambda: model.embed(["warmup"]))
+
 
 STORE = runtime.STORE
 CSS = (Path(__file__).parent / "static" / "style.css").read_text(encoding="utf-8")
@@ -59,7 +82,15 @@ def index():
     # Per-client UI state.
     # ctx["edit"]: None, or {"pid": str, "files": [staged-entry, ...]} while editing files.
     # A staged entry: {name, origin: "disk"|"new", orig_name, content: bytes|None, deleted: bool}.
-    ctx = {"open_pid": None, "chat_pid": None, "messages": [], "edit": None}
+    # ctx["live_message"]: the assistant message currently streaming (rendered by
+    # its own refreshable so trace events don't re-render the whole history).
+    ctx = {
+        "open_pid": None,
+        "chat_pid": None,
+        "messages": [],
+        "edit": None,
+        "live_message": None,
+    }
 
     # ── refreshable views ──
 
@@ -249,6 +280,15 @@ def index():
             render_message(m)
 
     @ui.refreshable
+    def live_message_view():
+        # The one assistant message being streamed, rendered in its own
+        # refreshable: every trace event / answer refresh only THIS view, so
+        # the completed history above isn't rebuilt per agent step (an O(history)
+        # DOM rebuild per trace entry that grows with every exchanged message).
+        if ctx["live_message"]:
+            render_message(ctx["live_message"])
+
+    @ui.refreshable
     def chat_panel():
         pid = ctx["chat_pid"]
         frozen = bool(pid) and runtime.is_frozen(pid)
@@ -275,6 +315,7 @@ def index():
             with ui.scroll_area().classes("grow w-full min-w-0"):
                 with ui.column().classes("w-full gap-2 min-w-0"):
                     messages_view()
+                    live_message_view()
             with ui.row().classes("w-full no-wrap items-center"):
                 inp = (
                     ui.input(placeholder="Ask a question…")
@@ -349,6 +390,7 @@ def index():
         if ctx["chat_pid"] != pid:
             ctx["chat_pid"] = pid
             ctx["messages"] = []
+            ctx["live_message"] = None
         open_project(pid)  # also select the project (highlight card, show its files)
         chat_panel.refresh()
 
@@ -400,6 +442,7 @@ def index():
             if ctx["chat_pid"] == pid:
                 ctx["chat_pid"] = None
                 ctx["messages"] = []
+                ctx["live_message"] = None
             projects_list.refresh()
             files_panel.refresh()
             chat_panel.refresh()
@@ -916,14 +959,24 @@ def index():
             return
         inp.value = ""
         ctx["messages"].append({"role": "user", "text": q})
+        # The streaming assistant message lives OUTSIDE ctx["messages"] (in
+        # ctx["live_message"]) while it streams, so its per-trace-event
+        # refreshes touch only live_message_view. On completion it moves into
+        # the history and the full list is rebuilt exactly once.
         assistant = {"role": "assistant", "text": "", "trace": []}
-        ctx["messages"].append(assistant)
+        ctx["live_message"] = assistant
         messages_view.refresh()
-        async for kind, payload in run_chat(pid, q):
-            if kind == "trace":
-                assistant["trace"].append(payload)
-            elif kind == "answer":
-                assistant["text"] = payload
+        live_message_view.refresh()
+        try:
+            async for kind, payload in run_chat(pid, q):
+                if kind == "trace":
+                    assistant["trace"].append(payload)
+                elif kind == "answer":
+                    assistant["text"] = payload
+                live_message_view.refresh()
+        finally:
+            ctx["messages"].append(assistant)
+            ctx["live_message"] = None
             messages_view.refresh()
 
     # ── layout ──

@@ -32,6 +32,11 @@ class ProjectStore:
         self.lancedb_dir = self.root / "lancedb"
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.lancedb_dir.mkdir(parents=True, exist_ok=True)
+        # list_projects cache — invalidated by every mutation that changes the
+        # list (create/rename/delete). The sidebar re-reads the list on every
+        # refresh tick during a reindex, so the cache avoids re-reading and
+        # re-parsing every meta.json each time.
+        self._list_cache: list[dict] | None = None
 
     # ── paths ──
 
@@ -56,11 +61,18 @@ class ProjectStore:
         self._meta_path(pid).write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        # Any meta write can change what list_projects returns (name) — drop
+        # the cache here, the single choke point for create/rename/settings.
+        self._list_cache = None
 
     # ── projects ──
 
     def list_projects(self) -> list[dict]:
-        """All projects, newest first."""
+        """All projects, newest first. Cached until the next mutation."""
+        if self._list_cache is not None:
+            # A copy: callers sort/mutate the returned list (the sidebar
+            # re-orders it), and mutating the cached object would corrupt it.
+            return list(self._list_cache)
         projects = []
         for d in self.projects_dir.iterdir():
             if d.is_dir() and (d / "meta.json").exists():
@@ -69,7 +81,8 @@ class ProjectStore:
                 except Exception:
                     continue
         projects.sort(key=lambda m: m.get("created_at", ""), reverse=True)
-        return projects
+        self._list_cache = projects
+        return list(projects)
 
     def get(self, pid: str) -> dict | None:
         if self._meta_path(pid).exists():
@@ -93,6 +106,7 @@ class ProjectStore:
         invalidate_db_cache(self.db_path(pid))
         shutil.rmtree(self._project_dir(pid), ignore_errors=True)
         shutil.rmtree(Path(self.db_path(pid)), ignore_errors=True)
+        self._list_cache = None
 
     # ── per-project indexing settings ──
 

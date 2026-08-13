@@ -3,6 +3,8 @@
 LangChain @tool wrappers for use with bind_tools() in the Search Fanout agent.
 """
 
+from pathlib import Path
+
 from langchain_core.tools import tool
 
 from src.vectordb.config import vdb_settings
@@ -277,9 +279,26 @@ async def count_chunks(collection: str, db_path: str | None = None) -> int | Non
         return None
 
 
+# Per-path cache: {db path: (dir mtime_ns, [names])}. One query run lists the
+# same DB once per node (planner, rewriter, judge, synthesis, give_up) while
+# nothing changed — the cache turns repeats into a stat + list reuse instead
+# of a fresh paginated directory walk. Keyed by the DB dir's mtime: any table
+# create/drop touches the dir mtime, so entries self-invalidate. Growth is
+# bounded — one entry per DB path.
+_table_names_cache: dict[str, tuple[int, list[str]]] = {}
+
+
 async def _list_table_names(db_path: str | None = None) -> list[str]:
     """Walk LanceDB's paginated table listing into a flat list of names."""
     db = await get_async_db(db_path)
+    path = db_path or vdb_settings.lance_db_path
+    try:
+        mtime = Path(path).stat().st_mtime_ns
+    except OSError:
+        mtime = -1
+    entry = _table_names_cache.get(path)
+    if entry is not None and entry[0] == mtime:
+        return entry[1]
     # Async LanceDB: list_tables() (table_names() is deprecated) returns a
     # paginated ListTablesResponse — walk page_token to collect every name.
     names: list[str] = []
@@ -290,6 +309,7 @@ async def _list_table_names(db_path: str | None = None) -> list[str]:
         page_token = resp.page_token
         if not page_token:
             break
+    _table_names_cache[path] = (mtime, names)
     return names
 
 

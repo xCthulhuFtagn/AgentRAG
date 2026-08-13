@@ -98,6 +98,15 @@ async def search_fanout_node(
 
     results = await asyncio.gather(*[search_one(c, q) for c, q in resolved])
 
+    # Per-run rerank memo: {chunk text → verdict} from SUCCESSFUL assessments.
+    # Iteration searches re-fetch chunks already judged in an earlier turn (a
+    # rewritten query overlaps earlier results) — the memo reuses that verdict
+    # instead of paying a fresh LLM call for the same (chunk, original query)
+    # pair; the user query is constant for the whole run, so the text alone is
+    # the key. Only True/False are memoized: a failed assessment (None) is
+    # re-attempted next turn, exactly as without the memo.
+    relevance_memo: dict[str, bool] = dict(state.get("relevance_memo") or {})
+
     # ── LLM per-chunk relevance assessment (opt-in) — over KNN HITS only ────
     # Assessed BEFORE stitching: only the actual hits are judged, so a
     # coherent structural block pulled in afterward by gather_neighbors is
@@ -119,7 +128,24 @@ async def search_fanout_node(
                 chunk_map.append((ri, ci))
 
         if all_chunks:
-            relevance = await assess_chunks_relevance(all_chunks, query)
+            # Memo hits get their earlier verdict; only unseen chunks go to
+            # the LLM (in one shared gather, as before).
+            flags: list[bool | None] = [None] * len(all_chunks)
+            pending_idx: list[int] = []
+            for i, chunk in enumerate(all_chunks):
+                if chunk in relevance_memo:
+                    flags[i] = relevance_memo[chunk]
+                else:
+                    pending_idx.append(i)
+            if pending_idx:
+                fresh = await assess_chunks_relevance(
+                    [all_chunks[i] for i in pending_idx], query
+                )
+                for i, rel in zip(pending_idx, fresh):
+                    flags[i] = rel
+                    if rel is not None:
+                        relevance_memo[all_chunks[i]] = rel
+            relevance = flags
             for ri, r in enumerate(results):
                 if not r.get("error"):
                     r.setdefault("relevant", [None] * len(r.get("chunks", [])))
@@ -149,12 +175,15 @@ async def search_fanout_node(
     # Deterministic context expansion: stitch each surviving hit back to its
     # contiguous seq-neighborhood so truncated structural blocks (TOC,
     # reference lists) come back whole. Legacy tables (no seq) → no-op.
-    for r in results:
+    # Each result's expansion is an independent read of its own table — run
+    # them concurrently like the searches above (LanceDB async handles
+    # concurrent scans); the loop over results was sequential before.
+    async def stitch_one(r: dict) -> dict:
         if r.get("error"):
-            continue
+            return r
         seqs = r.get("seqs") or []
         if not (seqs and any(s is not None for s in seqs)):
-            continue
+            return r
         hit_relevant = r.get("relevant")  # aligned with current chunks/seqs
         hit_flag_by_seq = (
             {s: hit_relevant[i] for i, s in enumerate(seqs) if s is not None}
@@ -172,6 +201,9 @@ async def search_fanout_node(
                 # individually assessed — None, not inherited from a hit
                 # elsewhere in the same merged window.
                 r["relevant"] = [hit_flag_by_seq.get(e["seq"]) for e in expanded]
+        return r
+
+    results = list(await asyncio.gather(*(stitch_one(r) for r in results)))
 
     # Keep EVERY executed search, including empty ones: search_results is the
     # record the mechanical statistics are computed from (searched set, «+0
@@ -198,6 +230,7 @@ async def search_fanout_node(
         goto="sufficient_context",
         update={
             "search_results": results,
+            "relevance_memo": relevance_memo,
             "trace": [trace_entry],
         },
     )

@@ -691,6 +691,91 @@ async def test_search_fanout_keeps_unassessed_chunks(monkeypatch):
     assert result["relevant"] == [None, True]
 
 
+@pytest.mark.asyncio
+async def test_search_fanout_reuses_memoized_rerank_verdicts(monkeypatch):
+    # A chunk already assessed on an earlier iteration keeps its verdict — the
+    # LLM is asked only about unseen chunks, and fresh verdicts join the memo
+    # for the next iteration.
+    from src.agents import search_fanout as sf
+    import src.agents.common as common_mod
+
+    async def fake_search(args: dict) -> dict:
+        return {
+            "collection": args["collection"],
+            "query": args["query"],
+            "chunks": ["known relevant", "fresh chunk"],
+            "scores": [0.1, 0.2],
+            "seqs": [1, 2],
+        }
+
+    assessed: list[list[str]] = []
+
+    async def fake_assess(chunks, query):
+        assessed.append(list(chunks))
+        return [True]
+
+    monkeypatch.setattr(sf, "vector_search", SimpleNamespace(ainvoke=fake_search))
+    # No stitching — keep the raw hits so `relevant` stays aligned with them.
+    async def no_stitch(*a, **kw):
+        return None
+
+    monkeypatch.setattr(sf, "gather_neighbors", no_stitch)
+    monkeypatch.setattr(common_mod, "assess_chunks_relevance", fake_assess)
+
+    state = make_initial_state(query="q")
+    state["search_tasks"] = [{"collection": "lit", "query": "q"}]
+    state["stitch_settings"] = {"reranking_enabled": True}
+    state["relevance_memo"] = {"known relevant": True}
+
+    command = await sf.search_fanout_node(state, config={})
+    result = command.update["search_results"][0]
+
+    # Only the unseen chunk went to the LLM; the memoized one kept its flag.
+    assert assessed == [["fresh chunk"]]
+    assert result["relevant"] == [True, True]
+    # The fresh verdict joined the memo for the next iteration.
+    assert command.update["relevance_memo"] == {
+        "known relevant": True,
+        "fresh chunk": True,
+    }
+
+
+@pytest.mark.asyncio
+async def test_search_fanout_does_not_memoize_failed_assessments(monkeypatch):
+    # None means "the assessment call itself failed" — it must NOT enter the
+    # memo, so the next iteration re-attempts it exactly as without the memo.
+    from src.agents import search_fanout as sf
+    import src.agents.common as common_mod
+
+    async def fake_search(args: dict) -> dict:
+        return {
+            "collection": args["collection"],
+            "query": args["query"],
+            "chunks": ["unstable chunk"],
+            "scores": [0.1],
+            "seqs": [7],
+        }
+
+    async def fake_assess(chunks, query):
+        return [None]
+
+    async def no_stitch(*a, **kw):
+        return None
+
+    monkeypatch.setattr(sf, "vector_search", SimpleNamespace(ainvoke=fake_search))
+    monkeypatch.setattr(sf, "gather_neighbors", no_stitch)
+    monkeypatch.setattr(common_mod, "assess_chunks_relevance", fake_assess)
+
+    state = make_initial_state(query="q")
+    state["search_tasks"] = [{"collection": "lit", "query": "q"}]
+    state["stitch_settings"] = {"reranking_enabled": True}
+
+    command = await sf.search_fanout_node(state, config={})
+
+    assert command.update["relevance_memo"] == {}
+    assert command.update["search_results"][0]["relevant"] == [None]
+
+
 # ── render_search_context: dedup + grouping for judge/synthesis prompts ─────
 
 def test_render_search_context_dedups_by_seq_in_doc_order():
